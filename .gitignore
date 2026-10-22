@@ -1,0 +1,11 @@
+# Private library folder (each person makes their own)
+.venv/
+
+# Python and Jupyter leftovers
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Your real holdings are personal, so they stay off git
+data/*.json
+data/*.tmp

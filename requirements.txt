@@ -1,0 +1,14 @@
+# Shopping list of libraries for MyStocks.
+# Install with:  python -m pip install -r requirements.txt
+
+yfinance        # free stock prices and company facts from Yahoo Finance
+pandas          # tables of numbers
+numpy           # fast math
+scipy           # the optimizer engine (chunk 4)
+plotly          # charts
+streamlit       # the app screens your partner builds
+
+# For the Jupyter notebook
+notebook
+ipykernel
+nbformat
