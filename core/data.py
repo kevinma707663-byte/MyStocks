@@ -20,6 +20,7 @@ THE FUNCTIONS OTHER FILES USE
     price_on(prices, day)             -> the price on a day, or the closest day before
     get_group_companies(kind, key)    -> the biggest companies in an industry or sector
     get_us_10y_yield()                -> US 10-year government bond yield, daily
+    get_us_3m_yield()                 -> today's US 3-month government bill rate
     get_us_inflation()                -> US inflation (yearly price rise), monthly
     get_us_gdp_growth()               -> US economic growth, quarterly
     get_analyst_data(ticker)          -> analyst ratings, price targets, rating changes, forecasts
@@ -703,3 +704,18 @@ def get_analyst_data(ticker: str) -> dict:
 
     # Hand back copies so nobody scribbles on the remembered answer.
     return {name: (piece.copy() if hasattr(piece, "copy") else piece) for name, piece in pieces.items()}
+
+
+def get_us_3m_yield() -> float:
+    """Today's US 3-month government bill rate, in %. 4.0 means 4%.
+
+    This is what a completely safe investment pays right now, so it's the
+    "risk-free rate" in the Sharpe ratio. Falls back to 4% with a warning
+    if Yahoo doesn't answer.
+    """
+    try:
+        # Yahoo treats it like a ticker: ^IRX. The last few days are enough.
+        return float(get_prices("^IRX", period="5d")["^IRX"].dropna().iloc[-1])
+    except Exception as error:
+        warnings.warn(f"Couldn't get the US 3-month bill rate ({error}). Using 4%.")
+        return 4.0
