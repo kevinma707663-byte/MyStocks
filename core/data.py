@@ -103,6 +103,7 @@ INFO_FIELDS = {
     "industry_key": "industryKey",                     # Yahoo's code for the industry, e.g. "semiconductors"
     "sector_key": "sectorKey",                         # Yahoo's code for the sector, e.g. "technology"
     "insider_ownership": "heldPercentInsiders",        # share of stock owned by insiders. 0.04 means 4%
+    "shares_outstanding": "sharesOutstanding",         # how many shares exist in total
 }
 
 

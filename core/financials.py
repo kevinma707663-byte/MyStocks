@@ -36,6 +36,7 @@ THE FUNCTIONS OTHER FILES USE
     ratio_chart(ratios, keys)     -> line chart of chosen ratios over the years
     format_statement(table)       -> a statement with readable numbers (416.16B)
     format_ratios(ratios)         -> the ratios with readable numbers (26.9%, 34.1x)
+    format_money(value)           -> one big number made readable (416161000000 -> 416.16B)
 """
 
 # Lets us write type hints like list[str] on older Python versions too.
@@ -623,8 +624,11 @@ def ratio_chart(ratios: pd.DataFrame, keys: list, title: str = "Ratios over time
 # full of text, so use them only for showing, never for more math.
 # ===========================================================================
 
-def _money(value) -> str:
-    """416161000000 -> "416.16B", 98500000 -> "98.5M", 7.46 -> "7.46"."""
+def format_money(value) -> str:
+    """Make one big money number readable.
+
+    416161000000 -> "416.16B", 98500000 -> "98.5M", 7.46 -> "7.46". Blank -> "n/a".
+    """
     if pd.isna(value):
         return "n/a"
     if abs(value) >= 1e9:
@@ -636,8 +640,8 @@ def _money(value) -> str:
 
 def format_statement(table: pd.DataFrame) -> pd.DataFrame:
     """A statement from statements(...) with readable numbers like "416.16B"."""
-    # .map() runs _money on every single cell.
-    return table.map(_money)
+    # .map() runs format_money on every single cell.
+    return table.map(format_money)
 
 
 def format_ratios(ratios: pd.DataFrame) -> pd.DataFrame:
@@ -663,7 +667,7 @@ def format_ratios(ratios: pd.DataFrame) -> pd.DataFrame:
             elif unit == "x":
                 text = f"{value:.2f}x"
             else:
-                text = _money(value)
+                text = format_money(value)
             shown.loc[key, period] = text
 
     return shown.set_index("label")
