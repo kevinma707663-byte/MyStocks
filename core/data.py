@@ -22,6 +22,7 @@ THE FUNCTIONS OTHER FILES USE
     get_us_10y_yield()                -> US 10-year government bond yield, daily
     get_us_inflation()                -> US inflation (yearly price rise), monthly
     get_us_gdp_growth()               -> US economic growth, quarterly
+    get_analyst_data(ticker)          -> analyst ratings, price targets, rating changes, forecasts
 
 WHERE THE ECONOMY NUMBERS COME FROM
     10-year yield  Yahoo Finance (ticker ^TNX)
@@ -643,3 +644,61 @@ def get_price_bars(ticker: str, period: str = "2y", adjusted: bool = False) -> p
         return bars
 
     return _remember(("bars", ticker, period, adjusted), fetch).copy()
+
+
+# ===========================================================================
+# WHAT THE ANALYSTS SAY
+# ===========================================================================
+
+def get_analyst_data(ticker: str) -> dict:
+    """Everything Yahoo has on what professional analysts think of a stock.
+
+    Returns a dictionary of five pieces. Any piece Yahoo doesn't have comes
+    back empty, so the app never crashes because one piece is missing.
+
+        "ratings"    how many analysts say strong buy / buy / hold / sell /
+                     strong sell, now ("0m") and 1, 2 and 3 months ago
+        "targets"    where analysts think the price will be in a year:
+                     {"current", "low", "mean", "median", "high"}
+        "actions"    every rating change and price target change, newest
+                     first: date, firm, old and new rating, target moves
+        "forecasts"  the average forecast of earnings per share (EPS) for
+                     this quarter, next quarter, this year and next year,
+                     now and 7, 30, 60 and 90 days ago
+        "revisions"  how many analysts raised or cut those forecasts in the
+                     last 7 and 30 days
+    """
+    ticker = clean_tickers(ticker)[0]
+
+    def fetch():
+        company = yf.Ticker(ticker)
+
+        # Each piece is fetched on its own, so one failure doesn't sink the rest.
+        def safely(get, empty):
+            try:
+                value = get()
+                return empty if value is None or len(value) == 0 else value
+            except Exception:
+                return empty
+
+        pieces = {
+            "ratings": safely(lambda: company.recommendations, pd.DataFrame()),
+            "targets": safely(lambda: company.analyst_price_targets, {}),
+            "actions": safely(lambda: company.upgrades_downgrades, pd.DataFrame()),
+            "forecasts": safely(lambda: company.eps_trend, pd.DataFrame()),
+            "revisions": safely(lambda: company.eps_revisions, pd.DataFrame()),
+        }
+        # If every piece is empty, Yahoo has nothing on this ticker.
+        if all(len(piece) == 0 for piece in pieces.values()):
+            raise ValueError("Yahoo has no analyst data")
+        return pieces
+
+    try:
+        pieces = _remember(("analysts", ticker), fetch)
+    except Exception as error:
+        warnings.warn(f"Couldn't get analyst data for {ticker} ({error}).")
+        pieces = {"ratings": pd.DataFrame(), "targets": {}, "actions": pd.DataFrame(),
+                  "forecasts": pd.DataFrame(), "revisions": pd.DataFrame()}
+
+    # Hand back copies so nobody scribbles on the remembered answer.
+    return {name: (piece.copy() if hasattr(piece, "copy") else piece) for name, piece in pieces.items()}
