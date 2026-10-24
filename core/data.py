@@ -12,6 +12,7 @@ WHY IT'S SEPARATE
 
 THE FUNCTIONS OTHER FILES USE
     get_prices(tickers, period)       -> table of daily prices
+    get_daily_returns(tickers, years) -> daily % changes over the days ALL the stocks traded
     get_price_bars(ticker, period)    -> daily open, high, low, close and volume
     get_latest_prices(tickers)        -> today's price for each ticker
     get_info(ticker)                  -> company facts (sector, P/E, etc.)
@@ -719,3 +720,17 @@ def get_us_3m_yield() -> float:
     except Exception as error:
         warnings.warn(f"Couldn't get the US 3-month bill rate ({error}). Using 4%.")
         return 4.0
+
+
+def get_daily_returns(tickers, years: int = 3) -> pd.DataFrame:
+    """Daily % changes for every stock, over the period they ALL traded.
+
+    One row per day, one column per stock. 0.01 means up 1% that day.
+    Uses dividend-adjusted prices, so dividends count as part of the return.
+    Stocks with no prices at all are left out (with a warning).
+    """
+    prices = get_prices(tickers, period=f"{years}y").ffill()
+    # Start on the first day every stock has a price, so all stocks are
+    # compared over the same days.
+    prices = prices.dropna()
+    return prices.pct_change().dropna()

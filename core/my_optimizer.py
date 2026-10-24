@@ -119,18 +119,6 @@ SUMMARY_COLUMNS = ["yearly return %", "yearly swings %", "Sharpe ratio", "worst 
 # SMALL HELPERS
 # ===========================================================================
 
-def _daily_returns(tickers: list, years: int) -> pd.DataFrame:
-    """Daily % changes for every stock, over the period they ALL traded.
-
-    One row per day, one column per stock. 0.01 means up 1% that day.
-    """
-    prices = data.get_prices(tickers, period=f"{years}y").ffill()
-    # Start on the first day every stock has a price, so all stocks are
-    # compared over the same days.
-    prices = prices.dropna()
-    return prices.pct_change().dropna()
-
-
 def _fit_limits(weights: np.ndarray, low: float, high: float) -> np.ndarray:
     """Nudge every mix so each weight is between `low` and `high` and they add up to 1.
 
@@ -239,7 +227,7 @@ def optimize(
 
     # --- 1. Prices and daily returns -----------------------------------------
     tickers = data.clean_tickers(tickers)
-    returns = _daily_returns(tickers, years)
+    returns = data.get_daily_returns(tickers, years)
     tickers = list(returns.columns)                   # some may have been dropped
     n = len(tickers)
     if n < 2:
