@@ -33,6 +33,14 @@ THE DISCOUNT RATE, IN PLAIN WORDS
     Cost of debt    the interest rate the company pays, after tax
     WACC            weighted average cost of capital: the two costs above,
                     weighted by how much of the company is shares vs debt
+    The 8% minimum  very steady stocks can come out at 6% to 7%, which makes
+                    their value balloon. So the worked-out rate never goes
+                    below 8%. A rate you type in yourself is never changed.
+
+SHARES
+    Total shares = the company's market value / its share price. That counts
+    every class of shares (Quebecor has Class A and Class B), where Yahoo's
+    own share count can cover only one class.
 
 A SIMPLIFICATION TO KNOW ABOUT
     The free cash flow from the cash flow statement is after interest.
@@ -86,6 +94,12 @@ DEBT_SPREAD_PCT = 1.5          # cost of debt when unknown: the 10-year yield + 
 FALLBACK_RISK_FREE_PCT = 4.5   # used only if the 10-year yield can't be fetched
 
 MIN_SPREAD_PCT = 1.0           # the discount rate must beat long-term growth by 1 point
+
+# The lowest discount rate the model will work out by itself. Very steady
+# stocks (low beta) can come out at 6% to 7%, which makes far-future cash
+# count for so much that the value balloons. Many analysts use a floor like
+# this. A discount rate you type in yourself is never changed.
+MIN_DISCOUNT_RATE_PCT = 8.0
 CHEAP_MARGIN_PCT = 15.0        # value 15% or more above the price counts as undervalued
 
 
@@ -345,7 +359,17 @@ def dcf_valuation(
 
     # --- 2. Price, shares, and currency -------------------------------------
     price = float(data.get_latest_prices(ticker).iloc[0])
-    shares = info["shares_outstanding"]
+
+    # How many shares the company has in TOTAL. Some companies have more than
+    # one class of shares (Quebecor has Class A and Class B), and Yahoo's share
+    # count can cover only the class you looked up. The company's market value
+    # divided by the price counts every class, so we use that when we can.
+    if info["market_cap"] and price > 0:
+        shares = info["market_cap"] / price
+        shares_source = "market value / price (counts every class of shares)"
+    else:
+        shares = info["shares_outstanding"]
+        shares_source = "Yahoo's share count"
     if not shares:
         raise ValueError(f"Yahoo doesn't say how many shares {ticker} has, so a DCF can't divide the value up.")
     fx, currency_note = _currency_rate(ticker)
@@ -362,6 +386,10 @@ def dcf_valuation(
     if discount_rate_pct is None:
         discount_rate_pct = rate["discount_rate_pct"]
         rate_source = "cost of equity" if use_dividends else "WACC"
+        # Never let the worked-out rate fall below the floor.
+        if discount_rate_pct < MIN_DISCOUNT_RATE_PCT:
+            rate_source = f"{rate_source} of {discount_rate_pct:.2f}%, raised to the {MIN_DISCOUNT_RATE_PCT:g}% minimum"
+            discount_rate_pct = MIN_DISCOUNT_RATE_PCT
     else:
         rate_source = "your own choice"
 
@@ -442,6 +470,7 @@ def dcf_valuation(
             ("Funded by shares", f"{rate['equity_share_pct']:.0f}%", "market value vs debt"),
         ]
     rows.append(("Discount rate", f"{discount_rate_pct:.2f}%", rate_source))
+    rows.append(("Shares counted", f"{shares / 1e6:,.0f} million", shares_source))
     assumptions = pd.DataFrame(rows, columns=["assumption", "value", "where it comes from"]).set_index("assumption")
 
     # --- 8. Cautions -------------------------------------------------------------
