@@ -530,6 +530,9 @@ def ratios_table(ticker: str) -> pd.DataFrame:
 
     Look up one number like this:  table.loc["pe_ratio", "TTM"]
     """
+    # Tidy up the ticker first ("aapl " -> "AAPL"), like every other section does.
+    ticker = data.clean_tickers(ticker)[0]
+
     yearly = _yearly_facts(ticker)
     if yearly.empty:
         warnings.warn(f"No financial statements for {ticker}. Funds and ETFs don't have them.")

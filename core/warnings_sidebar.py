@@ -5,6 +5,10 @@ WHAT THIS FILE DOES
     Before you record a buy or a sell, it checks for the classic mistakes
     investors make and gives you friendly, plain-English warnings. It is a
     helper on your shoulder, never a gatekeeper: it NEVER blocks a trade.
+    If the market data it needs isn't there (Yahoo is down, or the ticker
+    has a typo), you get a "Couldn't check" heads-up instead of an error.
+    Real input mistakes, like selling more than you own or typing "ten"
+    for shares, still stop with a clear message, as they always have.
 
     It also has standing warnings, which look at what you already own
     without any trade (for example, a loser you've held for a long time).
@@ -16,7 +20,10 @@ THE TRAPS IT LOOKS FOR
       Averaging down        buying more of a stock you're already losing money
                             on, hoping to "get back to even" faster.
       Too much in one place after this buy, one stock or one sector would be
-                            a very big slice of your money.
+                            a very big slice of your money. Skipped for your
+                            first stock (every portfolio starts at 100% in one
+                            stock) and for adding to your only stock. MyRisks
+                            still flags a one-stock portfolio as high risk.
       Superficial loss      buying back a stock within 30 days of selling it at
                             a loss. In Canada that loss can't be claimed for tax.
 
@@ -38,6 +45,9 @@ THE TRAPS IT LOOKS FOR
       Holding a loser       a stock down a lot that you've held over a year.
                             Ask yourself: would I buy it today at this price?
       Too much in one place one stock or one sector is a very big slice already.
+                            Only checked once you own 2 or more stocks.
+      Ticker not found      a stock with no price, usually a typo. It's left out
+                            of your totals and the other checks until it's fixed.
 
 TWO LEVELS
     "heads-up"   worth a second thought
@@ -158,22 +168,36 @@ def check_trade(portfolio: dict, action: str, ticker: str, shares, price, trade_
     if action not in ("buy", "sell"):
         raise ValueError('Action must be "buy" or "sell".')
     ticker = data.clean_tickers(ticker)[0]
-    shares, price = float(shares), float(price)
+    shares = pf._positive_number(shares, "Shares")      # "ten" -> a plain-English error
+    price = pf._positive_number(price, "Price")
     day = _to_day(trade_date)
 
     found = []
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")        # other sections' messages aren't needed here
-        positions = ms.positions_table(portfolio)
-        mine = positions[positions["ticker"] == ticker]
-        owned = not mine.empty
+        try:
+            # Only stocks with a price can be checked. A mistyped ticker has none,
+            # and standing_warnings() already flags it.
+            positions = ms.positions_table(portfolio).dropna(subset=["price"])
+            mine = positions[positions["ticker"] == ticker]
 
-        if action == "buy":
-            found += _buy_checks(portfolio, positions, mine, ticker, shares, price, day)
-        else:
-            found += _sell_checks(portfolio, positions, mine, ticker, shares, price, day)
+            if action == "buy":
+                found += _buy_checks(portfolio, positions, mine, ticker, shares, price, day)
+            else:
+                found += _sell_checks(portfolio, positions, mine, ticker, shares, price, day)
+        except Exception:
+            # These checks need market data. If it isn't there (Yahoo is down,
+            # or the ticker has a typo), say so instead of stopping: the
+            # sidebar must never block a trade. "Exception" catches every
+            # kind of failure on purpose, because a download can fail in many ways.
+            found = [_warning(
+                "Couldn't check", "heads-up",
+                f"There's no market data for {ticker} right now, so this trade wasn't checked for traps.",
+                "Check the spelling (Canadian stocks need .TO at the end, like RY.TO). "
+                "If it's right, Yahoo may be busy: try again in a minute.",
+            )]
 
-        # --- Any trade: overtrading --------------------------------------------
+        # --- Any trade: overtrading (only needs your diary, so it always runs) --------------------------------------------
         recent = _trades_in_window(portfolio, day, 30)
         recent = recent[pd.to_datetime(recent["date"]).dt.date <= day]     # only the past 30 days
         if len(recent) + 1 >= BUSY_TRADES:
@@ -344,6 +368,17 @@ def standing_warnings(portfolio: dict) -> list:
         positions = ms.positions_table(portfolio)
         if positions.empty:
             return found
+
+        # --- A ticker with no price (usually a typo) ------------------------------------
+        for ticker in positions.loc[positions["price"].isna(), "ticker"]:
+            found.append(_warning(
+                "Ticker not found", "caution",
+                f"There's no price for {ticker}, so it's left out of your totals and checks.",
+                "Check the spelling. Canadian stocks need .TO at the end, like RY.TO.",
+            ))
+        # The checks below only work on stocks with a price.
+        positions = positions.dropna(subset=["price"])
+
         receipts = pf.holdings_table(portfolio)
         receipts["buy_date"] = pd.to_datetime(receipts["buy_date"])
 

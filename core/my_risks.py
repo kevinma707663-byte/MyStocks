@@ -29,11 +29,18 @@ HOW THE SCORE WORKS
     Each area's level counts as low = 0, medium = 50, high = 100, and the
     score is their average. 60 or more is a high overall level, 35 to 60
     medium, below 35 low.
+    An area that can't be measured (like "moving together" with only one
+    stock) gets "n/a" and is left out of the average, instead of counting
+    as low.
+    A low score means none of the eight areas crossed its warning line.
+    It doesn't mean no risk: every stock can still fall.
 
 DATA
     The same dividend-adjusted daily prices as MyOptimizer, over the days
     every stock traded. Each stock's moves are in its own currency, and
     currency risk gets its own area instead.
+    A stock with no price history is left out, with a warning, and the
+    report lists it under "left_out".
 
 PAST RISK ISN'T A PROMISE
     These numbers describe the past few years. Markets can do things they
@@ -51,6 +58,9 @@ THE FUNCTIONS OTHER FILES USE
 
 # Lets us write type hints like list[str] on older Python versions too.
 from __future__ import annotations
+
+# warnings: shows a gentle message without stopping the program.
+import warnings
 
 # numpy: math helpers. np.nan means "blank / not a number".
 import numpy as np
@@ -94,7 +104,12 @@ LIMITS = {
     "bad_day_pct": (1.5, 2.5),
 }
 
+# Points for the score. "n/a" (couldn't be measured) has no points, so the
+# score's average leaves it out.
 LEVEL_POINTS = {"low": 0, "medium": 50, "high": 100}
+
+# The levels that deserve a suggestion.
+FLAGGED = ("medium", "high")
 
 
 # ===========================================================================
@@ -102,18 +117,21 @@ LEVEL_POINTS = {"low": 0, "medium": 50, "high": 100}
 # ===========================================================================
 
 def _level(value: float, key: str) -> str:
-    """Turn a measurement into "low", "medium" or "high" using LIMITS."""
+    """Turn a measurement into "low", "medium" or "high" using LIMITS.
+
+    A blank measurement (NaN) gives "n/a": unknown is not the same as low.
+    """
     medium, high = LIMITS[key]
     if pd.isna(value):
-        return "low"
+        return "n/a"
     if key == "effective_stocks":               # fewer stocks = riskier
         return "high" if value < high else "medium" if value < medium else "low"
     return "high" if value >= high else "medium" if value >= medium else "low"
 
 
 def _worse(*levels: str) -> str:
-    """The riskier of several levels."""
-    return max(levels, key=lambda level: LEVEL_POINTS[level])
+    """The riskier of several levels. "n/a" only wins if nothing else is known."""
+    return max(levels, key=lambda level: LEVEL_POINTS.get(level, -1))
 
 
 def _money(amount: float, currency: str) -> str:
@@ -137,6 +155,13 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
     # --- Daily returns for the stocks and the S&P 500 -------------------------
     returns = data.get_daily_returns(list(weights.index) + [BENCHMARK], years)
     stocks = [t for t in weights.index if t in returns.columns]
+    if not stocks:
+        raise ValueError(f"None of these have price history: {', '.join(weights.index)}. Check the tickers.")
+    # Say clearly which stocks couldn't be measured, instead of quietly
+    # sharing their money out among the others.
+    left_out = [t for t in weights.index if t not in stocks]
+    if left_out:
+        warnings.warn(f"{', '.join(left_out)} had no price history, so this report leaves them out.")
     w = weights[stocks] / weights[stocks].sum()       # re-add to 1 if any were dropped
     stock_returns = returns[stocks]
     portfolio = stock_returns @ w                    # the mix's daily % change
@@ -152,7 +177,7 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
     level = _worse(_level(biggest_pct, "biggest_holding_pct"), _level(effective, "effective_stocks"))
     areas.append({"area": "Concentration", "level": level,
                   "reading": f"Biggest: {biggest} {biggest_pct:.0f}%. Top 3: {top3_pct:.0f}%. Acts like {effective:.1f} equal stocks."})
-    if level != "low":
+    if level in FLAGGED:
         top.append((LEVEL_POINTS[level], f"{biggest} is {biggest_pct:.0f}% of your money, and your portfolio acts like only "
                                          f"{effective:.1f} equal-sized stocks. Spreading money across more stocks would lower this."))
 
@@ -163,7 +188,7 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
     how_many = f"{len(by_sector)} sector" + ("" if len(by_sector) == 1 else "s")
     areas.append({"area": "Sector", "level": level,
                   "reading": f"{top_sector_pct:.0f}% in {top_sector}, across {how_many}."})
-    if level != "low":
+    if level in FLAGGED:
         top.append((LEVEL_POINTS[level], f"{top_sector_pct:.0f}% of your money is in {top_sector}. "
                                          f"Adding stocks from other sectors would spread the risk."))
 
@@ -175,7 +200,7 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
     split = ", ".join(f"{c} {p:.0f}%" for c, p in by_currency.sort_values(ascending=False).items())
     areas.append({"area": "Currency", "level": level,
                   "reading": f"{split}. A {FX_MOVE_PCT}% move in exchange rates would change your total by about {_money(fx_hit, home_currency)}."})
-    if level != "low":
+    if level in FLAGGED:
         top.append((LEVEL_POINTS[level], f"{foreign_pct:.0f}% of your money is outside {home_currency}. If those currencies fell "
                                          f"{FX_MOVE_PCT}% against the {home_currency}, you'd lose about {_money(fx_hit, home_currency)}."))
 
@@ -199,9 +224,9 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
     else:
         reading = "Only one stock, so there's nothing to compare."
     areas.append({"area": "Moving together", "level": level, "reading": reading})
-    if level != "low" or len(close_pairs):
+    if level in FLAGGED or len(close_pairs):
         a, b = pairs.index[0]
-        top.append((max(LEVEL_POINTS[level], 50 if len(close_pairs) else 0),
+        top.append((max(LEVEL_POINTS.get(level, 0), 50 if len(close_pairs) else 0),
                     f"{a} and {b} move very closely together (correlation {pairs.iloc[0]:.2f}), so owning both "
                     f"protects you less than you'd think."))
 
@@ -223,7 +248,7 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
     outsized = shares[(shares["risk %"] > 1.5 * shares["money %"]) & (shares["risk %"] >= 15)]
     if len(outsized):
         t = outsized.index[0]
-        top.append((max(LEVEL_POINTS[level], 50),
+        top.append((max(LEVEL_POINTS.get(level, 0), 50),
                     f"{t} is {shares.loc[t, 'money %']:.0f}% of your money but {shares.loc[t, 'risk %']:.0f}% of your risk. "
                     f"Trimming it would calm the portfolio down the most."))
 
@@ -235,7 +260,7 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
     areas.append({"area": "Market risk", "level": level,
                   "reading": f"Beta {beta:.2f}. If the S&P 500 fell {MARKET_FALL_PCT}%, you'd expect about -{stress_pct:.0f}% "
                              f"({_money(stress_hit, home_currency)})."})
-    if level != "low":
+    if level in FLAGGED:
         top.append((LEVEL_POINTS[level], f"Your beta is {beta:.2f}: when the S&P 500 falls 10%, your portfolio has tended to fall "
                                          f"about {beta * 10:.0f}%. Steadier stocks, like consumer staples, would lower it."))
 
@@ -254,7 +279,7 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
     areas.append({"area": "Worst drop", "level": level,
                   "reading": f"{worst_drop:.1f}% at its worst, on {worst_day}. "
                              f"Worst single stock: {stock_drops.index[0]} {stock_drops.iloc[0]:.0f}%."})
-    if level != "low":
+    if level in FLAGGED:
         top.append((LEVEL_POINTS[level], f"Your mix fell {abs(worst_drop):.0f}% at its worst (on {worst_day}). "
                                          f"Ask yourself if you could sit through that again without selling."))
 
@@ -268,12 +293,14 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
     areas.append({"area": "Bad day", "level": level,
                   "reading": f"About 1 day in 20, you could lose {bad_day:.1f}% ({_money(value * bad_day / 100, home_currency)}) "
                              f"or more. On those days the average loss is {shortfall:.1f}%."})
-    if level != "low":
+    if level in FLAGGED:
         top.append((LEVEL_POINTS[level], f"On a bad day (1 in 20), you could lose about {_money(value * bad_day / 100, home_currency)}. "
                                          f"If that would worry you, a steadier mix would help."))
 
     # --- Add it all up -----------------------------------------------------------------
     areas = pd.DataFrame(areas).set_index("area")
+    # .map() turns "n/a" into a blank, and .mean() skips blanks, so areas
+    # that couldn't be measured don't drag the score down.
     score = float(areas["level"].map(LEVEL_POINTS).mean())
     overall = "high" if score >= 60 else "medium" if score >= 35 else "low"
     top.sort(key=lambda item: item[0], reverse=True)   # highest-level risks first
@@ -283,6 +310,7 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
         "level": overall,
         "areas": areas,
         "top_risks": [text for _, text in top[:3]],
+        "left_out": left_out,                           # stocks with no price history
         "value": value,
         "home_currency": home_currency,
         "period": {"start": returns.index[0].date(), "end": returns.index[-1].date(),
@@ -319,6 +347,7 @@ def portfolio_risks(portfolio: dict, years: int = YEARS, home_currency: str = HO
           "level":       "low", "medium" or "high"
           "areas":       table: the eight areas, each with a level and a reading
           "top_risks":   up to 3 plain-English risks with suggestions, worst first
+          "left_out":    stocks with no price history, left out of the report
           "sectors", "currencies", "weights":  your money split three ways, in %
           "correlation": which stocks move together (a grid from -1 to 1)
           "risk_shares": each stock's money % vs risk %
@@ -348,8 +377,20 @@ def mix_risks(mix: dict, value: float = 10_000, years: int = YEARS, home_currenc
     mix    {ticker: % of your money}, like {"AAPL": 40, "KO": 60}
     value  the pretend total, for dollar amounts. Default $10,000.
     """
-    tickers = data.clean_tickers(list(mix))
-    weights = pd.Series([float(mix[t]) for t in mix], index=tickers)
+    # Tidy each ticker on its own ("ko " -> "KO") and add up its weight.
+    # Blank tickers are skipped, and a ticker typed twice gets both weights.
+    weights = {}
+    for ticker, percent in mix.items():
+        ticker = str(ticker).strip().upper()
+        if not ticker:
+            continue
+        try:
+            percent = float(percent)
+        except (TypeError, ValueError):
+            # "from None" hides Python's confusing internal error and shows only ours.
+            raise ValueError(f'Weights must be numbers, like 40 for 40%. {ticker} has "{percent}".') from None
+        weights[ticker] = weights.get(ticker, 0) + percent
+    weights = pd.Series(weights, dtype=float)
     weights = weights[weights > 0]
     if len(weights) == 0:
         raise ValueError("The mix has no stocks with money in them.")

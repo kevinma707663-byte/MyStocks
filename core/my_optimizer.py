@@ -21,14 +21,20 @@ THE RULES YOU CAN SET (and their starting values)
 THE WORDS, IN PLAIN ENGLISH
     Yearly return   how fast the money grew per year, on average ("CAGR")
     Yearly swings   how much it bounced around ("volatility"). Bigger means bumpier.
-    Sharpe ratio    (yearly return - what a safe 3-month US bill pays) / yearly swings.
+    Sharpe ratio    (average yearly return - what a safe 3-month US bill pays) / yearly swings.
                     Return per bump. Above 1 is good, above 2 is excellent.
+                    This is the standard version: the average daily return
+                    x 252 trading days. It comes out a little higher than the
+                    "yearly return" above, because bumps slow down real growth.
     Worst drop      the biggest fall from a peak to a low ("max drawdown").
                     -25% means at its worst, $10,000 had shrunk to $7,500.
 
 HOW IT WORKS
     1. Download dividend-adjusted daily prices for every stock.
-    2. Make 20,000 random mixes that follow the weight limits.
+    2. Make 20,000 random mixes that follow the weight limits, plus a few
+       "corner" mixes that pile as much as allowed into the best stocks.
+       Random mixes almost never land on corners, and that's where the
+       highest-return mixes live, so tough return rules aren't missed.
     3. For each mix, replay the past: what it returned, how much it swung,
        and its worst drop. The mix is kept the same every day.
     4. Keep only the mixes that follow your rules, and pick the best for your goal.
@@ -148,13 +154,15 @@ def _replay(returns: np.ndarray, weights: np.ndarray, risk_free: float) -> dict:
     Sharpe ratio and worst drop, all as decimals (0.08 means 8%).
     """
     years = returns.shape[0] / TRADING_DAYS
-    pieces = {"return": [], "swings": [], "drop": []}
+    pieces = {"return": [], "average": [], "swings": [], "drop": []}
 
     for start in range(0, len(weights), CHUNK):
         w = weights[start:start + CHUNK]
         daily = returns @ w.T                          # each mix's daily % change
         growth = np.cumprod(1 + daily, axis=0)         # $1 growing day by day
         pieces["return"].append(growth[-1] ** (1 / years) - 1)
+        # The average day's return x 252 days: the standard input to Sharpe.
+        pieces["average"].append(daily.mean(axis=0) * TRADING_DAYS)
         pieces["swings"].append(daily.std(axis=0, ddof=1) * np.sqrt(TRADING_DAYS))
         # The worst drop: how far below its highest point so far it ever fell.
         # The starting $1 counts as a high point too.
@@ -162,8 +170,36 @@ def _replay(returns: np.ndarray, weights: np.ndarray, risk_free: float) -> dict:
         pieces["drop"].append((growth / peak - 1).min(axis=0))
 
     result = {name: np.concatenate(values) for name, values in pieces.items()}
-    result["sharpe"] = (result["return"] - risk_free) / result["swings"]
+    result["sharpe"] = (result["average"] - risk_free) / result["swings"]
     return result
+
+
+def _corner_mixes(returns: np.ndarray, low: float, high: float) -> np.ndarray:
+    """A few hand-built "corner" mixes that random mixes almost never hit.
+
+    Each one fills the stocks in a chosen order, giving each as much as the
+    limit allows before moving on to the next. The three orders are:
+    best return first, smallest worst drop first, and calmest first.
+    The highest-return mix that follows your weight limits is a corner
+    like this, so if any mix can meet a tough return rule, one of these can.
+    """
+    n = returns.shape[1]
+    alone = _replay(returns, np.eye(n), 0.0)          # each stock on its own
+    orders = [
+        np.argsort(-alone["return"]),                 # best return first
+        np.argsort(-alone["drop"]),                   # smallest worst drop first
+        np.argsort(alone["swings"]),                  # calmest first
+    ]
+    corners = []
+    for order in orders:
+        w = np.full(n, low)                           # everyone starts at the minimum
+        left = 1 - low * n                            # what's left to hand out
+        for i in order:
+            extra = min(high - low, left)             # as much as this stock may take
+            w[i] += extra
+            left -= extra
+        corners.append(w)
+    return np.array(corners)
 
 
 def _goal_value(stats: dict, goal: str) -> np.ndarray:
@@ -257,6 +293,8 @@ def optimize(
     # A "Dirichlet" draw gives random weights that already add up to 1.
     rng = np.random.default_rng(SEED)
     mixes = _fit_limits(rng.dirichlet(np.ones(n), size=MIXES), low, high)
+    # Add the corner mixes, which random draws almost never land on.
+    mixes = np.vstack([mixes, _corner_mixes(r, low, high)])
     stats = _replay(r, mixes, risk_free)
 
     # --- 4. Which mixes follow the rules? --------------------------------------
@@ -338,7 +376,7 @@ def optimize(
     else:
         best_stats = replay_one(best_w)
 
-    message = (f"Out of {MIXES:,} mixes, {int(fits.sum()):,} follow your rules. "
+    message = (f"Out of {len(mixes):,} mixes, {int(fits.sum()):,} follow your rules. "
                f"The best one for the {GOALS[goal]} is shown.")
     return _package("ok", message, tickers, goal, rules, limits, period, risk_free, returns,
                     best_w, best_stats, current_w, current_stats, cloud)
@@ -398,6 +436,13 @@ def optimize_portfolio(portfolio: dict, add: list = None, **rules) -> dict:
     positions = ms.positions_table(portfolio)
     current = dict(zip(positions["ticker"], positions["weight_pct"]))
 
+    # Nothing owned and nothing extra to try: explain what to do instead.
+    if not current and not add:
+        raise ValueError(
+            "Your portfolio is empty, so there's nothing to optimize yet. Add some stocks first, "
+            "or list at least 2 stocks you'd like to try (the 'add' list), like AAPL and KO."
+        )
+
     # Start with what you own, then add any extra tickers you don't own yet.
     tickers = list(current)
     if add:
@@ -438,7 +483,17 @@ def my_edit(result: dict, changes: dict) -> dict:
              or {t: 100 / len(tickers) for t in tickers})
 
     # --- Check the changes make sense ----------------------------------------
-    changes = {data.clean_tickers(t)[0]: float(v) for t, v in changes.items()}
+    # Tidy each ticker and turn each weight into a number. If someone typed
+    # "twenty" instead of 20, say so in plain English.
+    tidy = {}
+    for t, v in changes.items():
+        t = data.clean_tickers(t)[0]
+        try:
+            tidy[t] = float(v)
+        except (TypeError, ValueError):
+            # "from None" hides Python's confusing internal error and shows only ours.
+            raise ValueError(f'Weights must be numbers, like 20 for 20%. {t} has "{v}".') from None
+    changes = tidy
     unknown = [t for t in changes if t not in tickers]
     if unknown:
         raise ValueError(f"{unknown} weren't part of this optimization. Add them to the stock list and optimize again.")
@@ -453,7 +508,9 @@ def my_edit(result: dict, changes: dict) -> dict:
     if not others:
         if abs(set_total - 100) > 0.5:
             raise ValueError(f"You set every stock, but they add up to {set_total:g}%, not 100%.")
-        weights = dict(changes)
+        # Close enough (like 99.6% from rounding): scale them so they add up
+        # to exactly 100%, keeping the same proportions.
+        weights = {t: v / set_total * 100 for t, v in changes.items()}
     else:
         left = 100 - set_total
         before = sum(start.get(t, 0) for t in others)

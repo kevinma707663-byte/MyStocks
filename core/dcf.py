@@ -42,10 +42,16 @@ SHARES
     every class of shares (Quebecor has Class A and Class B), where Yahoo's
     own share count can cover only one class.
 
-A SIMPLIFICATION TO KNOW ABOUT
-    The free cash flow from the cash flow statement is after interest.
-    Strictly, a WACC model wants cash flow before interest. For most
-    companies the difference is small, and it keeps the model simple.
+CASH BEFORE PAYING LENDERS
+    A WACC model values the cash the business makes for EVERYONE who funds
+    it, lenders and shareholders, so it wants cash BEFORE interest is paid.
+    Most companies count interest paid inside operating cash, which makes
+    their reported free cash flow AFTER interest. So we add the interest
+    back, minus the tax it saved: interest x (1 - tax rate).
+    Some companies (often Canadian ones, like Loblaw or Dollarama) report
+    interest paid under financing instead. Their free cash flow is already
+    before interest, so nothing is added. The assumptions table says which.
+    The debt is then taken off at the end, because it's what lenders are owed.
 
 A DCF IS ONLY AS GOOD AS ITS GUESSES
     Small changes to growth or the discount rate move the answer a lot.
@@ -144,11 +150,34 @@ def _cash_numbers(ticker: str) -> dict:
         # Yahoo shows dividends paid as a negative number (cash going out).
         "dividends": abs(flow("cashflow", "Cash Dividends Paid")),
         "interest": flow("income", "Interest Expense"),
+        # Only companies that report interest paid under FINANCING have this
+        # line. Blank means it's counted inside operating cash (the usual way).
+        "interest_paid_in_financing": flow("cashflow", "Interest Paid Cff"),
         "tax": flow("income", "Tax Provision"),
         "pretax": flow("income", "Pretax Income"),
         "debt": balance("Total Debt"),
         "cash": balance("Cash And Cash Equivalents"),
     }
+
+
+def _tax_rate(numbers: dict) -> float:
+    """The company's own tax rate in %, if it made a profit. Otherwise 21%."""
+    if numbers["pretax"] and numbers["pretax"] > 0 and pd.notna(numbers["tax"]):
+        return float(np.clip(numbers["tax"] / numbers["pretax"] * 100, 0, 35))
+    return DEFAULT_TAX_PCT
+
+
+def _check_number(value, label: str) -> float:
+    """Turn a number you typed into a real number, or stop with a clear message."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        # "from None" hides Python's confusing internal error and shows only ours.
+        raise ValueError(f"{label} must be a number, like 5 for 5%.") from None
+    # float() also accepts "nan" (a blank number) and "inf" (infinity).
+    if not np.isfinite(number):
+        raise ValueError(f"{label} must be a number, like 5 for 5%.")
+    return number
 
 
 def _default_growth(ticker: str) -> tuple:
@@ -214,10 +243,7 @@ def _discount_rate(ticker: str, numbers: dict, market_value: float, use_dividend
         return pieces
 
     # --- Tax rate: the company's own, if it made a profit -------------------
-    if numbers["pretax"] and numbers["pretax"] > 0 and pd.notna(numbers["tax"]):
-        tax_rate = float(np.clip(numbers["tax"] / numbers["pretax"] * 100, 0, 35))
-    else:
-        tax_rate = DEFAULT_TAX_PCT
+    tax_rate = _tax_rate(numbers)
 
     # --- Cost of debt: interest paid / debt, kept within sensible bounds ----
     debt = numbers["debt"] if pd.notna(numbers["debt"]) else 0.0
@@ -340,6 +366,15 @@ def dcf_valuation(
     run, for example when free cash flow is negative.
     """
     ticker = data.clean_tickers(ticker)[0]
+
+    # Check any numbers you typed in. A blank (NaN) would quietly break every step.
+    if growth_pct is not None:
+        growth_pct = _check_number(growth_pct, "Growth")
+    terminal_growth_pct = _check_number(terminal_growth_pct, "Long-term growth")
+    if discount_rate_pct is not None:
+        discount_rate_pct = _check_number(discount_rate_pct, "The discount rate")
+    equity_risk_premium_pct = _check_number(equity_risk_premium_pct, "The equity risk premium")
+
     info = data.get_info(ticker)
     industry = info["industry"] or ""
     use_dividends = industry.startswith(fin.FINANCIAL_INDUSTRIES)
@@ -349,13 +384,37 @@ def dcf_valuation(
     numbers = _cash_numbers(ticker)
     if all(pd.isna(v) for v in numbers.values()):
         raise ValueError(f"{ticker} has no financial statements, so a DCF can't value it. Funds and ETFs don't have them.")
-    base = numbers["dividends"] if use_dividends else numbers["free_cash_flow"]
+
+    interest_added = 0.0
+    if use_dividends:
+        base = numbers["dividends"]
+    else:
+        # Free cash flow BEFORE paying lenders (see "CASH BEFORE PAYING LENDERS"
+        # at the top). Add back interest after tax, unless the company already
+        # reports interest paid under financing.
+        base = numbers["free_cash_flow"]
+        interest = numbers["interest"] if pd.notna(numbers["interest"]) else 0.0
+        if pd.isna(numbers["interest_paid_in_financing"]) and interest > 0:
+            interest_added = interest * (1 - _tax_rate(numbers) / 100)
+            base = base + interest_added
+
     if pd.isna(base) or base <= 0:
         what = "doesn't pay dividends" if use_dividends else "has negative free cash flow"
         raise ValueError(
             f"{ticker} {what} over the last 12 months, so a DCF can't value it. "
             f"Try price to sales in Part 3A instead."
         )
+
+    # Where the starting cash came from, for the assumptions table.
+    if use_dividends:
+        base_source = "the cash flow statement"
+    elif interest_added:
+        base_source = (f"free cash flow {fin.format_money(numbers['free_cash_flow'])} "
+                       f"+ interest after tax {fin.format_money(interest_added)}")
+    elif pd.notna(numbers["interest_paid_in_financing"]):
+        base_source = "free cash flow (interest paid is already under financing, so nothing is added)"
+    else:
+        base_source = "free cash flow (no interest to add back)"
 
     # --- 2. Price, shares, and currency -------------------------------------
     price = float(data.get_latest_prices(ticker).iloc[0])
@@ -452,9 +511,10 @@ def dcf_valuation(
     }
 
     # --- 7. The assumptions table ---------------------------------------------
-    base_label = "Starting dividends (last 12 months)" if use_dividends else "Starting free cash flow (last 12 months)"
+    base_label = ("Starting dividends (last 12 months)" if use_dividends
+                  else "Starting free cash flow before interest (last 12 months)")
     rows = [
-        (base_label, fin.format_money(base), "the cash flow statement"),
+        (base_label, fin.format_money(base), base_source),
         ("Growth, years 1 to 5", f"{growth_pct:.1f}%", growth_source),
         ("Growth, years 6 to 10", f"slows to {terminal_growth_pct:.1f}%", "steps down evenly each year"),
         ("Growth after year 10", f"{terminal_growth_pct:.1f}%", "roughly the long-run pace of the economy"),
@@ -503,8 +563,13 @@ def dcf_valuation(
         "bridge": bridge,
         "sensitivity": sensitivity,
         "notes": notes,
-        "inputs": {"base": base, "growth_pct": growth_pct, "terminal_growth_pct": terminal_growth_pct,
-                   "discount_rate_pct": discount_rate_pct, **rate},
+        # The worked-out pieces go in first, then the numbers the model really
+        # used. That way "discount_rate_pct" is the rate actually used (after
+        # the 8% minimum or your own choice), and the worked-out one is kept
+        # separately as "worked_out_rate_pct".
+        "inputs": {**rate, "worked_out_rate_pct": rate["discount_rate_pct"],
+                   "base": base, "interest_added": interest_added, "growth_pct": growth_pct,
+                   "terminal_growth_pct": terminal_growth_pct, "discount_rate_pct": discount_rate_pct},
     }
 
 

@@ -17,12 +17,14 @@ WHAT A PORTFOLIO LOOKS LIKE IN CODE
 
         {
           "holdings": [
-            {"ticker": "AAPL", "shares": 10.0, "buy_price": 150.0, "buy_date": "2024-01-15"}
+            {"ticker": "AAPL", "shares": 10.0, "buy_price": 150.0, "buy_date": "2024-01-15", "id": "3f9a1c2e"}
           ],
           "trades": [
-            {"date": "2024-01-15", "action": "buy", "ticker": "AAPL", "shares": 10.0, "price": 150.0}
+            {"date": "2024-01-15", "action": "buy", "ticker": "AAPL", "shares": 10.0, "price": 150.0, "id": "3f9a1c2e"}
           ]
         }
+
+    The "id" is a name tag linking a purchase to its diary line.
 
 WHY EACH PURCHASE IS ITS OWN ROW
     If you buy AAPL twice at different prices, you get two rows. That keeps
@@ -54,6 +56,12 @@ from __future__ import annotations
 
 # json: reads and writes the portfolio file (JSON is a simple text format).
 import json
+
+# math: we use math.isfinite to catch blank (NaN) or infinite numbers.
+import math
+
+# uuid: makes a short random name tag for each purchase.
+import uuid
 
 # date / datetime: for handling buy dates like 2024-01-15.
 from datetime import date, datetime
@@ -164,6 +172,11 @@ def _positive_number(value, label: str) -> float:
         # "from None" hides Python's confusing internal error and shows only ours.
         raise ValueError(f"{label} must be a number.") from None
 
+    # float() also accepts "nan" (a blank number) and "inf" (infinity).
+    # Neither is a real amount, so turn them away too.
+    if not math.isfinite(number):
+        raise ValueError(f"{label} must be a number.")
+
     # Zero or negative makes no sense for shares or prices.
     if number <= 0:
         raise ValueError(f"{label} must be more than 0.")
@@ -228,15 +241,19 @@ def add_holding(portfolio: dict, ticker: str, shares, buy_price, buy_date=None) 
     buy_price = _positive_number(buy_price, "Buy price")
     when = _past_date(buy_date, "Buy date")
 
+    # A short random name tag, like "3f9a1c2e". The receipt and its diary
+    # line both get it, so remove_holding() always deletes the right pair.
+    tag = uuid.uuid4().hex[:8]
+
     # Add a "receipt" to the holdings list.
     # .isoformat() turns the date into text like "2024-01-15" for the file.
     portfolio["holdings"].append(
-        {"ticker": ticker, "shares": shares, "buy_price": buy_price, "buy_date": when.isoformat()}
+        {"ticker": ticker, "shares": shares, "buy_price": buy_price, "buy_date": when.isoformat(), "id": tag}
     )
 
     # Add a matching line to the trade diary.
     portfolio["trades"].append(
-        {"date": when.isoformat(), "action": "buy", "ticker": ticker, "shares": shares, "price": buy_price}
+        {"date": when.isoformat(), "action": "buy", "ticker": ticker, "shares": shares, "price": buy_price, "id": tag}
     )
     return portfolio
 
@@ -265,6 +282,11 @@ def sell_holding(portfolio: dict, ticker: str, shares, sell_price, sell_date=Non
         idea of the average cost method. Sell everything, and the receipts
         disappear.
 
+    A SALE DATED IN THE PAST
+        Only purchases made on or before the sell date count, both for how
+        many shares you can sell and for the average cost. Shares you bought
+        later aren't touched.
+
     Returns the same portfolio. The locked-in gain (or loss, if negative)
     is saved in the trade diary under "realized_gain".
     """
@@ -279,15 +301,19 @@ def sell_holding(portfolio: dict, ticker: str, shares, sell_price, sell_date=Non
     if not receipts:
         raise ValueError(f"You don't own any {ticker}.")
 
-    # You can't sell more than you own.
-    owned = sum(h["shares"] for h in receipts)
-    if shares > owned + TINY:
-        raise ValueError(f"You only own {owned:g} shares of {ticker}.")
-
     # You can't sell before you first bought.
     first_buy = min(date.fromisoformat(h["buy_date"]) for h in receipts)
     if when < first_buy:
         raise ValueError(f"Sell date can't be before your first {ticker} purchase on {first_buy}.")
+
+    # Only shares bought ON OR BEFORE the sell date can be sold. A sale
+    # dated in February can't use shares you bought in March.
+    receipts = [h for h in receipts if date.fromisoformat(h["buy_date"]) <= when]
+
+    # You can't sell more than you owned on that day.
+    owned = sum(h["shares"] for h in receipts)
+    if shares > owned + TINY:
+        raise ValueError(f"You only owned {owned:g} shares of {ticker} on {when}.")
 
     # --- Work out the gain ---------------------------------------------------
     total_paid = sum(h["shares"] * h["buy_price"] for h in receipts)
@@ -338,18 +364,25 @@ def remove_holding(portfolio: dict, row: int) -> dict:
 
     # Take the receipt out of the holdings list.
     receipt = portfolio["holdings"].pop(row)
+    trades = portfolio["trades"]
 
-    # Find its matching diary line (same stock, date and price) and remove it.
-    for i, trade in enumerate(portfolio["trades"]):
-        if (
-            trade["action"] == "buy"
-            and trade["ticker"] == receipt["ticker"]
-            and trade["date"] == receipt["buy_date"]
-            and trade["price"] == receipt["buy_price"]
-        ):
-            del portfolio["trades"][i]
-            break  # only remove one line
+    # Find its matching diary line.
+    if "id" in receipt:
+        # Purchases have a name tag shared with their diary line: use that.
+        matches = [i for i, t in enumerate(trades) if t["action"] == "buy" and t.get("id") == receipt["id"]]
+    else:
+        # Purchases saved before name tags existed: same stock, date and price.
+        # If two buys share all three, prefer the one with the same shares too.
+        matches = [
+            i for i, t in enumerate(trades)
+            if t["action"] == "buy" and t["ticker"] == receipt["ticker"]
+            and t["date"] == receipt["buy_date"] and t["price"] == receipt["buy_price"]
+        ]
+        same_shares = [i for i in matches if abs(trades[i]["shares"] - receipt["shares"]) < TINY]
+        matches = same_shares or matches
 
+    if matches:
+        del trades[matches[0]]  # only remove one line
     return portfolio
 
 

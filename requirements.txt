@@ -1,14 +1,20 @@
 # Shopping list of libraries for MyStocks.
 # Install with:  python -m pip install -r requirements.txt
+#
+# ">=" is the version we tested with. "<" stops a future big update
+# (which can change how things work) from sneaking in.
 
-yfinance        # free stock prices and company facts from Yahoo Finance
-pandas          # tables of numbers
-numpy           # fast math
-scipy           # the optimizer engine (chunk 4)
-plotly          # charts
-streamlit       # the app screens your partner builds
+yfinance>=1.7,<2        # free stock prices and company facts from Yahoo Finance
+pandas>=3.0,<4          # tables of numbers
+numpy>=2.5,<3           # fast math
+scipy>=1.18,<2          # the optimizer engine (chunk 4)
+plotly>=7.1,<8          # charts
+streamlit>=1.66,<2      # the app screens your partner builds
 
 # For the Jupyter notebook
-notebook
-ipykernel
-nbformat
+notebook>=7.6,<8
+ipykernel>=7.4,<8
+nbformat>=5.11,<6
+
+# For the automatic checks:  python -m pytest tests
+pytest>=9.2,<10

@@ -41,6 +41,9 @@ PERCENTS
 # Lets us write type hints like list[str] on older Python versions too.
 from __future__ import annotations
 
+# warnings: shows a gentle message without stopping the program.
+import warnings
+
 # numpy: math helpers. We use np.nan, which means "blank / not a number".
 import numpy as np
 
@@ -163,7 +166,14 @@ def positions_table(portfolio: dict, home_currency: str = HOME_CURRENCY) -> pd.D
     # --- Today's and yesterday's prices ------------------------------------
     # The last 5 days of plain prices. .ffill() fills holiday gaps by
     # carrying the last known price forward.
-    recent = data.get_prices(list(combined.index), period="5d", adjusted=False).ffill()
+    try:
+        recent = data.get_prices(list(combined.index), period="5d", adjusted=False).ffill()
+    except ValueError:
+        # Yahoo had no prices for ANY of them (usually a typo in every ticker).
+        # Keep going with an empty price table, so every row shows a blank
+        # price instead of the whole section stopping.
+        warnings.warn(f"No price data for {list(combined.index)}. Check the tickers.")
+        recent = pd.DataFrame()
 
     # --- Build each row ------------------------------------------------------
     rows = []
@@ -259,15 +269,17 @@ def value_history(portfolio: dict, currency: str) -> pd.DataFrame:
     prices = data.get_prices(tickers, start=start, adjusted=False).ffill().bfill()
     sp500 = prices[BENCHMARK]
 
+    # Skip stocks Yahoo had no prices for (a warning was already shown).
+    # If that's every stock in the group, there's no line to draw.
+    receipts = receipts[receipts["ticker"].isin(prices.columns)]
+    if receipts.empty:
+        return pd.DataFrame(columns=[YOU, TWIN])
+
     # Two running totals that start at zero on every day.
     you = pd.Series(0.0, index=prices.index)
     twin = pd.Series(0.0, index=prices.index)
 
     for _, receipt in receipts.iterrows():
-        # Skip stocks Yahoo had no prices for (a warning was already shown).
-        if receipt["ticker"] not in prices.columns:
-            continue
-
         # True on every day from the buy date onward, False before it.
         owned = prices.index >= receipt["buy_date"]
 
@@ -337,11 +349,16 @@ def portfolio_summary(portfolio: dict, home_currency: str = HOME_CURRENCY) -> di
         # This group's stocks.
         held = positions[positions["currency"] == cur]
 
+        # Only stocks with a price count toward the totals. A mistyped ticker
+        # has no price, so counting what you paid for it would look like a
+        # 100% loss. (The S&P 500 twin skips those stocks too.)
+        priced = held.dropna(subset=["price"])
+
         # Add up the group.
-        value = held["value"].sum()
-        cost = held["cost"].sum()
+        value = priced["value"].sum()
+        cost = priced["cost"].sum()
         gain = value - cost
-        day_change = held["day_change"].sum()
+        day_change = priced["day_change"].sum()
         yesterday_value = value - day_change
 
         # How the S&P 500 twin did: its value today vs the same money spent.
