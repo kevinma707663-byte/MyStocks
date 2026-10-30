@@ -44,14 +44,21 @@ SHARES
 
 CASH BEFORE PAYING LENDERS
     A WACC model values the cash the business makes for EVERYONE who funds
-    it, lenders and shareholders, so it wants cash BEFORE interest is paid.
-    Most companies count interest paid inside operating cash, which makes
-    their reported free cash flow AFTER interest. So we add the interest
-    back, minus the tax it saved: interest x (1 - tax rate).
-    Some companies (often Canadian ones, like Loblaw or Dollarama) report
-    interest paid under financing instead. Their free cash flow is already
-    before interest, so nothing is added. The assumptions table says which.
-    The debt is then taken off at the end, because it's what lenders are owed.
+    it, lenders and shareholders, so it wants cash BEFORE interest is paid,
+    and without the tax that interest saved. (The WACC already counts that
+    tax saving, through the after-tax cost of debt. Counting it in the cash
+    too would count it twice.) Companies report interest one of two ways,
+    and both end up at the same number:
+      * Interest paid inside operating cash (most companies): free cash
+        flow is after interest, so add the interest back, minus the tax it
+        saved: + interest x (1 - tax rate).
+      * Interest paid under financing (often Canadian ones, like Loblaw or
+        Dollarama): free cash flow is already before interest, but its
+        taxes were still lowered by the interest, so take that tax saving
+        out: - interest x tax rate.
+    A company that paid no tax saved nothing, so its tax rate here is 0%.
+    The assumptions table says which way was used. The debt is then taken
+    off at the end, because it's what lenders are owed.
 
 A DCF IS ONLY AS GOOD AS ITS GUESSES
     Small changes to growth or the discount rate move the answer a lot.
@@ -165,6 +172,45 @@ def _tax_rate(numbers: dict) -> float:
     if numbers["pretax"] and numbers["pretax"] > 0 and pd.notna(numbers["tax"]):
         return float(np.clip(numbers["tax"] / numbers["pretax"] * 100, 0, 35))
     return DEFAULT_TAX_PCT
+
+
+def _tax_saving_rate(numbers: dict) -> float:
+    """The tax rate, in %, that interest actually saved the company.
+
+    A profitable company saved its own tax rate on every dollar of interest.
+    A company that lost money paid no tax, so interest saved it nothing: 0%.
+    If we can't tell, the usual 21%.
+    """
+    if pd.notna(numbers["pretax"]) and numbers["pretax"] <= 0:
+        return 0.0
+    return _tax_rate(numbers)
+
+
+def _unlevered_cash(numbers: dict) -> tuple:
+    """Free cash flow before interest and without its tax saving (see the top of this file).
+
+    Returns (cash, adjustment, where it came from). The adjustment is what
+    was added to reported free cash flow: positive when interest after tax
+    was added back, negative when only the tax saving was taken out.
+    """
+    reported = numbers["free_cash_flow"]
+    interest = numbers["interest"] if pd.notna(numbers["interest"]) else 0.0
+    tax = _tax_saving_rate(numbers) / 100
+
+    if interest <= 0:
+        adjustment = 0.0
+        source = "free cash flow (no interest to adjust for)"
+    elif pd.isna(numbers["interest_paid_in_financing"]):
+        # Interest paid inside operating cash: add it back, minus the tax it saved.
+        adjustment = interest * (1 - tax)
+        source = (f"free cash flow {fin.format_money(reported)} "
+                  f"+ interest after tax {fin.format_money(adjustment)}")
+    else:
+        # Interest paid under financing: only its tax saving comes out.
+        adjustment = -interest * tax
+        source = (f"free cash flow {fin.format_money(reported)} "
+                  f"- tax saved by interest {fin.format_money(-adjustment)} (interest paid is under financing)")
+    return reported + adjustment, adjustment, source
 
 
 def _check_number(value, label: str) -> float:
@@ -385,18 +431,14 @@ def dcf_valuation(
     if all(pd.isna(v) for v in numbers.values()):
         raise ValueError(f"{ticker} has no financial statements, so a DCF can't value it. Funds and ETFs don't have them.")
 
-    interest_added = 0.0
+    interest_adjustment = 0.0
     if use_dividends:
         base = numbers["dividends"]
+        base_source = "the cash flow statement"
     else:
-        # Free cash flow BEFORE paying lenders (see "CASH BEFORE PAYING LENDERS"
-        # at the top). Add back interest after tax, unless the company already
-        # reports interest paid under financing.
-        base = numbers["free_cash_flow"]
-        interest = numbers["interest"] if pd.notna(numbers["interest"]) else 0.0
-        if pd.isna(numbers["interest_paid_in_financing"]) and interest > 0:
-            interest_added = interest * (1 - _tax_rate(numbers) / 100)
-            base = base + interest_added
+        # Free cash flow before paying lenders, the same whichever way the
+        # company reports interest (see "CASH BEFORE PAYING LENDERS" at the top).
+        base, interest_adjustment, base_source = _unlevered_cash(numbers)
 
     if pd.isna(base) or base <= 0:
         what = "doesn't pay dividends" if use_dividends else "has negative free cash flow"
@@ -404,17 +446,6 @@ def dcf_valuation(
             f"{ticker} {what} over the last 12 months, so a DCF can't value it. "
             f"Try price to sales in Part 3A instead."
         )
-
-    # Where the starting cash came from, for the assumptions table.
-    if use_dividends:
-        base_source = "the cash flow statement"
-    elif interest_added:
-        base_source = (f"free cash flow {fin.format_money(numbers['free_cash_flow'])} "
-                       f"+ interest after tax {fin.format_money(interest_added)}")
-    elif pd.notna(numbers["interest_paid_in_financing"]):
-        base_source = "free cash flow (interest paid is already under financing, so nothing is added)"
-    else:
-        base_source = "free cash flow (no interest to add back)"
 
     # --- 2. Price, shares, and currency -------------------------------------
     price = float(data.get_latest_prices(ticker).iloc[0])
@@ -568,7 +599,7 @@ def dcf_valuation(
         # the 8% minimum or your own choice), and the worked-out one is kept
         # separately as "worked_out_rate_pct".
         "inputs": {**rate, "worked_out_rate_pct": rate["discount_rate_pct"],
-                   "base": base, "interest_added": interest_added, "growth_pct": growth_pct,
+                   "base": base, "interest_adjustment": interest_adjustment, "growth_pct": growth_pct,
                    "terminal_growth_pct": terminal_growth_pct, "discount_rate_pct": discount_rate_pct},
     }
 

@@ -1,6 +1,10 @@
 # Shopping list of libraries for MyStocks.
 # Install with:  python -m pip install -r requirements.txt
 #
+# NEEDS PYTHON 3.12 OR NEWER (numpy and scipy require it). Tested on 3.13
+# and 3.12. Check yours with:  python --version
+# On Streamlit Community Cloud, pick Python 3.12 or 3.13 in the app's settings.
+#
 # ">=" is the version we tested with. "<" stops a future big update
 # (which can change how things work) from sneaking in.
 

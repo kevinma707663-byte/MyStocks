@@ -75,6 +75,7 @@ import plotly.graph_objects as go
 # Our own files. The dot means "from this same core/ folder".
 from . import data
 from . import my_stocks as ms
+from . import portfolio as pf
 
 
 # ===========================================================================
@@ -83,6 +84,7 @@ from . import my_stocks as ms
 
 YEARS = 3                  # years of past prices to measure risk on
 TRADING_DAYS = 252         # trading days in a year
+MIN_SHARED_DAYS = 20       # fewer days of shared price history than this is too little to measure
 BENCHMARK = "SPY"          # the S&P 500 fund, for market risk
 HOME_CURRENCY = "CAD"      # the currency your total is counted in
 FX_MOVE_PCT = 10           # the exchange-rate move used in the currency check
@@ -162,6 +164,13 @@ def _risks(weights: pd.Series, sectors: pd.Series, currencies: pd.Series,
     left_out = [t for t in weights.index if t not in stocks]
     if left_out:
         warnings.warn(f"{', '.join(left_out)} had no price history, so this report leaves them out.")
+    # The days every stock (and the S&P 500) traded. Histories that barely
+    # overlap leave too few days to measure anything.
+    if len(returns) < MIN_SHARED_DAYS:
+        raise ValueError(
+            f"These stocks only share {len(returns)} trading days of price history, too few to measure. "
+            f"Try stocks that have all traded for at least a month."
+        )
     w = weights[stocks] / weights[stocks].sum()       # re-add to 1 if any were dropped
     stock_returns = returns[stocks]
     portfolio = stock_returns @ w                    # the mix's daily % change
@@ -385,11 +394,13 @@ def mix_risks(mix: dict, value: float = 10_000, years: int = YEARS, home_currenc
         if not ticker:
             continue
         try:
-            percent = float(percent)
-        except (TypeError, ValueError):
-            # "from None" hides Python's confusing internal error and shows only ours.
+            # A real number: not "forty", and not a blank (NaN) or infinity.
+            number = pf._finite_number(percent, "Weight")
+        except ValueError:
+            # "from None" hides the first message and shows only this clearer one.
             raise ValueError(f'Weights must be numbers, like 40 for 40%. {ticker} has "{percent}".') from None
-        weights[ticker] = weights.get(ticker, 0) + percent
+        weights[ticker] = weights.get(ticker, 0) + number
+    value = pf._positive_number(value, "The pretend total")
     weights = pd.Series(weights, dtype=float)
     weights = weights[weights > 0]
     if len(weights) == 0:

@@ -88,6 +88,7 @@ from scipy.optimize import minimize
 # Our own files. The dot means "from this same core/ folder".
 from . import data
 from . import my_stocks as ms
+from . import portfolio as pf
 
 
 # ===========================================================================
@@ -105,6 +106,8 @@ YEARS = 3
 
 MIXES = 20_000            # how many random mixes to try
 TRADING_DAYS = 252        # trading days in a year
+MIN_SHARED_DAYS = 20      # fewer days of shared price history than this is too little to measure
+SEARCH_STARTS = 5         # how many of the closest random mixes the closer search starts from
 START_MONEY = 10_000      # for the growth chart
 SEED = 42                 # fixed, so the same inputs always give the same answer
 CHUNK = 2_000             # mixes replayed at a time, to keep memory use small
@@ -170,7 +173,11 @@ def _replay(returns: np.ndarray, weights: np.ndarray, risk_free: float) -> dict:
         pieces["drop"].append((growth / peak - 1).min(axis=0))
 
     result = {name: np.concatenate(values) for name, values in pieces.items()}
-    result["sharpe"] = (result["average"] - risk_free) / result["swings"]
+    # A mix with no swings at all (only possible with made-up prices) would
+    # divide by zero. numpy then gives "infinity" (endless return per bump),
+    # which is fine here, so the warning about it is switched off.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result["sharpe"] = (result["average"] - risk_free) / result["swings"]
     return result
 
 
@@ -180,8 +187,9 @@ def _corner_mixes(returns: np.ndarray, low: float, high: float) -> np.ndarray:
     Each one fills the stocks in a chosen order, giving each as much as the
     limit allows before moving on to the next. The three orders are:
     best return first, smallest worst drop first, and calmest first.
-    The highest-return mix that follows your weight limits is a corner
-    like this, so if any mix can meet a tough return rule, one of these can.
+    High-return mixes are often corners like these, so they're worth trying.
+    They don't cover every possibility (a well-balanced mix in the middle
+    can beat them), which is why _search_for_a_fit() exists.
     """
     n = returns.shape[1]
     alone = _replay(returns, np.eye(n), 0.0)          # each stock on its own
@@ -200,6 +208,44 @@ def _corner_mixes(returns: np.ndarray, low: float, high: float) -> np.ndarray:
             left -= extra
         corners.append(w)
     return np.array(corners)
+
+
+def _search_for_a_fit(returns: np.ndarray, starts: list, low: float, high: float,
+                      min_return: float, max_drop: float, risk_free: float):
+    """Look harder for a mix that follows both rules, when none of the tried mixes did.
+
+    From each starting mix, scipy's solver looks for the mix that beats
+    BOTH rules by the widest margin. Returns the first mix that truly
+    follows both, or None if none was found. None doesn't prove no mix
+    exists: it means this search didn't find one.
+    """
+    n = returns.shape[1]
+
+    def margins(w):
+        # How far a mix is past each rule: positive means it follows it.
+        stats = _replay(returns, np.asarray(w)[None, :], risk_free)
+        return stats["return"][0] - min_return, stats["drop"][0] - max_drop
+
+    for start in starts:
+        # The solver works on n weights plus one extra number, m: the margin
+        # both rules must beat. Making m as big as possible pushes the mix
+        # toward following both rules with room to spare.
+        x0 = np.append(start, min(margins(start)))
+        solver = minimize(
+            lambda x: -x[-1], x0, method="SLSQP",
+            bounds=[(low, high)] * n + [(-10, 10)],
+            constraints=[
+                {"type": "eq", "fun": lambda x: x[:-1].sum() - 1},
+                {"type": "ineq", "fun": lambda x: margins(x[:-1])[0] - x[-1]},
+                {"type": "ineq", "fun": lambda x: margins(x[:-1])[1] - x[-1]},
+            ],
+            options={"maxiter": 200},
+        )
+        # Keep it only if, checked again from scratch, it truly follows both rules.
+        w = _fit_limits(np.asarray(solver.x[:-1])[None, :], low, high)[0]
+        if min(margins(w)) >= -1e-9:
+            return w
+    return None
 
 
 def _goal_value(stats: dict, goal: str) -> np.ndarray:
@@ -245,7 +291,8 @@ def optimize(
 
     Returns a dictionary:
         {
-          "status":      "ok", or "no mix fits" when your rules can't all be met
+          "status":      "ok", or "no mix found" when no mix following every
+                         rule was found (that doesn't prove none exists)
           "message":     a plain-English sentence about the result
           "tickers", "goal", "rules", "period", "risk_free_pct",
           "comparison":  table: your current mix vs the best mix
@@ -261,6 +308,20 @@ def optimize(
     if goal not in GOALS:
         raise ValueError(f"Goal must be one of {list(GOALS)}.")
 
+    # Every rule must be a real number. A blank (NaN) would quietly pass
+    # every check below, so it's turned away here.
+    max_drawdown_pct = pf._finite_number(max_drawdown_pct, "The biggest drop allowed")
+    min_return_pct = pf._finite_number(min_return_pct, "The minimum yearly return")
+    max_weight_pct = pf._finite_number(max_weight_pct, "The most in one stock")
+    min_weight_pct = pf._finite_number(min_weight_pct, "The least in one stock")
+    years = int(pf._positive_number(years, "Years of history"))
+    if max_drawdown_pct < 0:
+        raise ValueError("The biggest drop allowed can't be below 0%.")
+    if not (0 < max_weight_pct <= 100 and 0 <= min_weight_pct <= max_weight_pct):
+        raise ValueError("Weight limits must be between 0% and 100%, with the least no more than the most.")
+    if years < 1:
+        raise ValueError("Years of history must be at least 1.")
+
     # --- 1. Prices and daily returns -----------------------------------------
     tickers = data.clean_tickers(tickers)
     returns = data.get_daily_returns(tickers, years)
@@ -268,6 +329,13 @@ def optimize(
     n = len(tickers)
     if n < 2:
         raise ValueError("MyOptimizer needs at least 2 stocks with price history to mix.")
+    # The days every stock traded. Stocks whose histories barely overlap
+    # leave too few days to measure anything.
+    if returns.shape[0] < MIN_SHARED_DAYS:
+        raise ValueError(
+            f"These stocks only share {returns.shape[0]} trading days of price history, too few to measure. "
+            f"Try stocks that have all traded for at least a month."
+        )
     if returns.shape[0] < TRADING_DAYS:
         warnings.warn(f"Only {returns.shape[0]} trading days of shared history, less than a year. Results are shaky.")
 
@@ -293,8 +361,11 @@ def optimize(
     # A "Dirichlet" draw gives random weights that already add up to 1.
     rng = np.random.default_rng(SEED)
     mixes = _fit_limits(rng.dirichlet(np.ones(n), size=MIXES), low, high)
-    # Add the corner mixes, which random draws almost never land on.
-    mixes = np.vstack([mixes, _corner_mixes(r, low, high)])
+    # Add the corner mixes, which random draws almost never land on, and
+    # the equal split (the same % in every stock).
+    corners = _corner_mixes(r, low, high)
+    equal = _fit_limits(np.full((1, n), 1 / n), low, high)
+    mixes = np.vstack([mixes, corners, equal])
     stats = _replay(r, mixes, risk_free)
 
     # --- 4. Which mixes follow the rules? --------------------------------------
@@ -305,7 +376,7 @@ def optimize(
     # --- Your current mix, for comparison -------------------------------------
     current_w = None
     if current:
-        raw = np.array([float(current.get(t, 0)) for t in tickers])
+        raw = np.array([pf._finite_number(current.get(t, 0), f"Your current weight for {t}") for t in tickers])
         if raw.sum() > 0:
             current_w = raw / raw.sum()
     current_stats = _replay(r, current_w[None, :], risk_free) if current_w is not None else None
@@ -327,32 +398,48 @@ def optimize(
         "fits rules": fits,
     })
 
-    # --- No mix fits: say which rule is the hardest ---------------------------
-    if not fits.any():
+    # --- 5. The best mix that fits ---------------------------------------------
+    found_by_search = False
+    if fits.any():
+        score = np.where(fits, _goal_value(stats, goal), -np.inf)
+        best_w = mixes[int(np.argmax(score))]
+    else:
+        # None of the tried mixes fits. Before saying so, look harder,
+        # starting from the mixes that came closest, the equal split and
+        # the corners.
+        shortfall = np.maximum(min_return - stats["return"], 0) + np.maximum(max_drop - stats["drop"], 0)
+        closest = mixes[np.argsort(shortfall)[:SEARCH_STARTS]]
+        starts = list(closest) + list(equal) + list(corners)
+        best_w = _search_for_a_fit(r, starts, low, high, min_return, max_drop, risk_free)
+        found_by_search = best_w is not None
+
+    # --- Nothing found: say which rule is the hardest ----------------------------
+    if best_w is None:
+        tried = (f"(It tried {len(mixes):,} mixes and a closer search. That doesn't prove no mix exists, "
+                 f"but finding one is unlikely.)")
         if not drop_ok.any() and not return_ok.any():
-            message = (f"No mix keeps the worst drop within -{max_drawdown_pct:g}% OR returns {min_return_pct:g}% a year. "
-                       f"Try allowing a bigger drop and a lower minimum return.")
+            message = (f"No mix was found that keeps the worst drop within -{max_drawdown_pct:g}% OR returns "
+                       f"{min_return_pct:g}% a year. Try allowing a bigger drop and a lower minimum return. {tried}")
         elif drop_ok.sum() < return_ok.sum():
             best_drop = stats["drop"][return_ok].max() * 100
-            message = (f"No mix returns at least {min_return_pct:g}% a year while keeping the worst drop within "
-                       f"-{max_drawdown_pct:g}%. The drop rule is the hardest: the smallest drop among mixes that "
-                       f"hit your return was {best_drop:.0f}%. Try allowing a bigger drop or a lower minimum return.")
+            message = (f"No mix was found that returns at least {min_return_pct:g}% a year while keeping the worst "
+                       f"drop within -{max_drawdown_pct:g}%. The drop rule is the hardest: the smallest drop among "
+                       f"mixes that hit your return was {best_drop:.0f}%. Try allowing a bigger drop or a lower "
+                       f"minimum return. {tried}")
         else:
             best_return = stats["return"][drop_ok].max() * 100
-            message = (f"No mix returns at least {min_return_pct:g}% a year while keeping the worst drop within "
-                       f"-{max_drawdown_pct:g}%. The return rule is the hardest: the best return among mixes within "
-                       f"your drop limit was {best_return:.1f}%. Try a lower minimum return or allowing a bigger drop.")
-        return _package("no mix fits", message, tickers, goal, rules, limits, period, risk_free, returns,
+            message = (f"No mix was found that returns at least {min_return_pct:g}% a year while keeping the worst "
+                       f"drop within -{max_drawdown_pct:g}%. The return rule is the hardest: the best return among "
+                       f"mixes within your drop limit was {best_return:.1f}%. Try a lower minimum return or allowing "
+                       f"a bigger drop. {tried}")
+        return _package("no mix found", message, tickers, goal, rules, limits, period, risk_free, returns,
                         None, None, current_w, current_stats, cloud)
 
-    # --- 5. The best mix that fits, then fine-tune it -------------------------
-    score = np.where(fits, _goal_value(stats, goal), -np.inf)
-    best_i = int(np.argmax(score))
-    best_w = mixes[best_i]
-    best_score = score[best_i]
-
+    # --- 6. Fine-tune the best mix ----------------------------------------------
     def replay_one(w):
         return _replay(r, np.asarray(w)[None, :], risk_free)
+
+    best_score = _goal_value(replay_one(best_w), goal)[0]
 
     def objective(w):
         return -_goal_value(replay_one(w), goal)[0]
@@ -376,15 +463,19 @@ def optimize(
     else:
         best_stats = replay_one(best_w)
 
-    message = (f"Out of {len(mixes):,} mixes, {int(fits.sum()):,} follow your rules. "
-               f"The best one for the {GOALS[goal]} is shown.")
+    if found_by_search:
+        message = (f"None of the {len(mixes):,} mixes tried at first followed your rules, but a closer search "
+                   f"found one. The best one for the {GOALS[goal]} is shown.")
+    else:
+        message = (f"Out of {len(mixes):,} mixes, {int(fits.sum()):,} follow your rules. "
+                   f"The best one for the {GOALS[goal]} is shown.")
     return _package("ok", message, tickers, goal, rules, limits, period, risk_free, returns,
                     best_w, best_stats, current_w, current_stats, cloud)
 
 
 def _package(status, message, tickers, goal, rules, limits, period, risk_free, returns,
              best_w, best_stats, current_w, current_stats, cloud) -> dict:
-    """Build the tables every caller gets back, for both "ok" and "no mix fits"."""
+    """Build the tables every caller gets back, for both "ok" and "no mix found"."""
     growth, comparison = {}, {}
     if current_w is not None:
         growth[CURRENT] = START_MONEY * np.cumprod(1 + returns.values @ current_w)
@@ -434,19 +525,21 @@ def optimize_portfolio(portfolio: dict, add: list = None, **rules) -> dict:
     (converted with today's exchange rate, like the pie chart).
     """
     positions = ms.positions_table(portfolio)
-    current = dict(zip(positions["ticker"], positions["weight_pct"]))
+    tickers = list(positions["ticker"])
+    # A stock with no current price (a typo, or Yahoo missing it today) has a
+    # blank weight, so it starts at 0% instead.
+    current = {t: w for t, w in zip(positions["ticker"], positions["weight_pct"]) if pd.notna(w)}
 
     # Nothing owned and nothing extra to try: explain what to do instead.
-    if not current and not add:
+    if not tickers and not add:
         raise ValueError(
             "Your portfolio is empty, so there's nothing to optimize yet. Add some stocks first, "
             "or list at least 2 stocks you'd like to try (the 'add' list), like AAPL and KO."
         )
 
     # Start with what you own, then add any extra tickers you don't own yet.
-    tickers = list(current)
     if add:
-        tickers += [t for t in data.clean_tickers(add) if t not in current]
+        tickers += [t for t in data.clean_tickers(add) if t not in tickers]
     return optimize(tickers, current=current, **rules)
 
 
@@ -483,15 +576,15 @@ def my_edit(result: dict, changes: dict) -> dict:
              or {t: 100 / len(tickers) for t in tickers})
 
     # --- Check the changes make sense ----------------------------------------
-    # Tidy each ticker and turn each weight into a number. If someone typed
-    # "twenty" instead of 20, say so in plain English.
+    # Tidy each ticker and turn each weight into a real number. If someone
+    # typed "twenty" instead of 20, or the box was blank (NaN), say so.
     tidy = {}
     for t, v in changes.items():
         t = data.clean_tickers(t)[0]
         try:
-            tidy[t] = float(v)
-        except (TypeError, ValueError):
-            # "from None" hides Python's confusing internal error and shows only ours.
+            tidy[t] = pf._finite_number(v, "Weight")
+        except ValueError:
+            # "from None" hides the first message and shows only this clearer one.
             raise ValueError(f'Weights must be numbers, like 20 for 20%. {t} has "{v}".') from None
     changes = tidy
     unknown = [t for t in changes if t not in tickers]
@@ -524,6 +617,10 @@ def my_edit(result: dict, changes: dict) -> dict:
     # --- Replay the edited mix over the same days ------------------------------
     returns = result["daily_returns"]
     stats = _replay(returns.values, w[None, :], result["risk_free"])
+    # Never call a mix fine if its numbers came out blank: every rule check
+    # below would quietly pass.
+    if not all(np.isfinite(stats[k][0]) for k in ("return", "swings", "drop")):
+        raise ValueError("Your edited mix couldn't be measured, so it can't be checked against your rules.")
     growth = result["growth"].copy()
     growth[EDIT] = START_MONEY * np.cumprod(1 + returns.values @ w)
 

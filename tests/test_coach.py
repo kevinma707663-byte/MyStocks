@@ -1,9 +1,9 @@
 """
 Automatic checks for the AI trading coach (core/coach.py).
 
-They never call the real AI. A pretend client hands back a ready-made
-answer, so the checks are free, fast, and give the same result every time.
-Run them with:  python -m pytest tests
+They never call the real AI, or the internet at all. A pretend client hands
+back a ready-made answer, so the checks are free, fast, and give the same
+result every time. Run them with:  python -m pytest tests
 """
 import json
 from types import SimpleNamespace
@@ -13,8 +13,15 @@ import httpx2
 import pytest
 
 from core import coach
+from core import data
 from core import portfolio as pf
 from core import warnings_sidebar as ws
+
+
+@pytest.fixture(autouse=True)
+def no_internet(monkeypatch):
+    """Every test here gets company facts from this stand-in, never from Yahoo."""
+    monkeypatch.setattr(data, "get_info", lambda ticker: {"currency": "USD", "name": ticker, "sector": None})
 
 
 # ===========================================================================
@@ -99,6 +106,21 @@ def test_numbers_from_the_facts_are_allowed():
     # Repeating the investor's own number back is fine.
     assert coach._unknown_numbers("You said you lost $3,500.", facts) == ["3,500"]
     assert coach._unknown_numbers("You said you lost $3,500.", facts, reason="I lost $3,500 last month") == []
+
+
+@pytest.mark.parametrize("note", [
+    "Would you still buy it if it hadn't moved?",
+    "You said you're scared it's going to zero. Has anything changed about the business?",
+    "Before you sell, what would make you hold on?",
+])
+def test_ordinary_coaching_questions_are_not_mistaken_for_advice(note):
+    result, _ = ask({"note": note, "biases": []}, reason="I'm scared it's going to zero")
+    assert result["status"] == "ok"
+
+
+def test_a_loss_written_as_down_8_percent_matches_the_facts():
+    facts = {"already_owned": {"this_price_vs_average_cost_pct": -8.3}}
+    assert coach._unknown_numbers("You're down about 8% on it.", facts) == []
 
 
 def test_the_real_anthropic_library_accepts_the_request():

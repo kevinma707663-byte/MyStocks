@@ -299,6 +299,22 @@ def value_history(portfolio: dict, currency: str) -> pd.DataFrame:
     return history.loc[history.index >= first_buy]
 
 
+def _twin_value_now(receipts: pd.DataFrame) -> float:
+    """What the S&P 500 twin is worth today, for exactly these purchases.
+
+    On each purchase's day, the twin spends the same money on the S&P 500
+    and holds it. It only needs S&P 500 prices, so it always covers every
+    purchase it's given, even one whose own price history is missing.
+    """
+    if receipts.empty:
+        return np.nan
+    # A week before the first purchase, so there's a price on or before each buy date.
+    start = receipts["buy_date"].min() - pd.Timedelta(days=7)
+    sp500 = data.get_prices(BENCHMARK, start=start, adjusted=False)[BENCHMARK].ffill().bfill()
+    twin_shares = sum(r["cost"] / data.price_on(sp500, r["buy_date"]) for _, r in receipts.iterrows())
+    return float(twin_shares * sp500.iloc[-1])
+
+
 # ===========================================================================
 # 3. THE HEADLINE NUMBERS
 # ===========================================================================
@@ -321,6 +337,7 @@ def portfolio_summary(portfolio: dict, home_currency: str = HOME_CURRENCY) -> di
               "realized_gain": 150.0,        gains locked in by selling
               "sp500_twin_gain_pct": 6.5,    how the twin did
               "beat_sp500_by_pct": 1.5,      positive means you beat it
+              "left_out": [],                stocks with no current price
             },
             "USD": { ... },
           },
@@ -332,6 +349,11 @@ def portfolio_summary(portfolio: dict, home_currency: str = HOME_CURRENCY) -> di
         }
 
     Each group's amounts are in its own currency. Only "combined" converts.
+
+    The cost, the value and the S&P 500 twin all cover the SAME stocks: the
+    ones with a current price. A stock without one (a typo, or Yahoo missing
+    it today) is left out of all three and listed under "left_out", so the
+    app can say the totals are partial.
     """
     positions = positions_table(portfolio, home_currency)
     receipts = _receipts(portfolio)
@@ -349,10 +371,10 @@ def portfolio_summary(portfolio: dict, home_currency: str = HOME_CURRENCY) -> di
         # This group's stocks.
         held = positions[positions["currency"] == cur]
 
-        # Only stocks with a price count toward the totals. A mistyped ticker
-        # has no price, so counting what you paid for it would look like a
-        # 100% loss. (The S&P 500 twin skips those stocks too.)
+        # Only stocks with a price count. A mistyped ticker has no price, so
+        # counting what you paid for it would look like a 100% loss.
         priced = held.dropna(subset=["price"])
+        left_out = sorted(set(held["ticker"]) - set(priced["ticker"]))
 
         # Add up the group.
         value = priced["value"].sum()
@@ -361,9 +383,10 @@ def portfolio_summary(portfolio: dict, home_currency: str = HOME_CURRENCY) -> di
         day_change = priced["day_change"].sum()
         yesterday_value = value - day_change
 
-        # How the S&P 500 twin did: its value today vs the same money spent.
-        history = value_history(portfolio, cur)
-        twin_now = history[TWIN].iloc[-1] if not history.empty else np.nan
+        # How the S&P 500 twin did, for exactly the same purchases as the
+        # cost above: its value today vs the same money spent.
+        valued = receipts[(receipts["currency"] == cur) & receipts["ticker"].isin(priced["ticker"])]
+        twin_now = _twin_value_now(valued)
         gain_pct = _pct(gain, cost)
         twin_gain_pct = _pct(twin_now - cost, cost)
 
@@ -380,6 +403,7 @@ def portfolio_summary(portfolio: dict, home_currency: str = HOME_CURRENCY) -> di
             "realized_gain": float(sells.loc[sells["currency"] == cur, "realized_gain"].sum()),
             "sp500_twin_gain_pct": float(twin_gain_pct),
             "beat_sp500_by_pct": float(gain_pct - twin_gain_pct),
+            "left_out": left_out,
         }
 
     # The combined total: every group converted into the home currency.

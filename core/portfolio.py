@@ -26,6 +26,15 @@ WHAT A PORTFOLIO LOOKS LIKE IN CODE
 
     The "id" is a name tag linking a purchase to its diary line.
 
+THE DIARY IS THE REAL RECORD
+    After every change (a buy, a sale, or fixing a typo), the receipts and
+    every sale's gain are worked out again by replaying the whole diary in
+    date order. Trades on the same day count in the order they were typed.
+    So typing an older trade late gives exactly the same answer as typing
+    everything in order. If a change would make any sale sell more shares
+    than you owned at that point, nothing changes and you get a message
+    naming that sale.
+
 WHY EACH PURCHASE IS ITS OWN ROW
     If you buy AAPL twice at different prices, you get two rows. That keeps
     the real buy date and price of each purchase, which later chunks need
@@ -43,6 +52,7 @@ THE FUNCTIONS OTHER FILES USE
     add_holding(portfolio, ...)      -> record a new purchase
     sell_holding(portfolio, ...)     -> record a sale
     remove_holding(portfolio, row)   -> delete a purchase typed by mistake
+    remove_trade(portfolio, row)     -> delete any diary line typed by mistake, even a sale
     holdings_table(portfolio)        -> holdings as a table
     trades_table(portfolio)          -> trade diary as a table
 
@@ -120,6 +130,14 @@ def load_portfolio(path=DEFAULT_PATH) -> dict:
     # .setdefault only adds it if it's missing.
     portfolio.setdefault("holdings", [])
     portfolio.setdefault("trades", [])
+
+    # A hand-made file with purchases but no diary: write the diary from the
+    # purchases, because every change now replays the diary.
+    if portfolio["holdings"] and not portfolio["trades"]:
+        for h in portfolio["holdings"]:
+            h.setdefault("id", uuid.uuid4().hex[:8])
+            portfolio["trades"].append({"date": h["buy_date"], "action": "buy", "ticker": h["ticker"],
+                                        "shares": h["shares"], "price": h["buy_price"], "id": h["id"]})
     return portfolio
 
 
@@ -160,10 +178,12 @@ def _clean_ticker(ticker) -> str:
     return ticker
 
 
-def _positive_number(value, label: str) -> float:
-    """Turn the input into a decimal number and make sure it's above zero.
+def _finite_number(value, label: str) -> float:
+    """Turn the input into a real decimal number, or stop with a clear message.
 
     label is the friendly name used in the error message, like "Shares".
+    Other files use this too (MyOptimizer, MyRisks), so every number a
+    person types gets the same check.
     """
     # Convert to a decimal number. If someone typed "ten", this fails.
     try:
@@ -176,6 +196,12 @@ def _positive_number(value, label: str) -> float:
     # Neither is a real amount, so turn them away too.
     if not math.isfinite(number):
         raise ValueError(f"{label} must be a number.")
+    return number
+
+
+def _positive_number(value, label: str) -> float:
+    """Turn the input into a real decimal number and make sure it's above zero."""
+    number = _finite_number(value, label)
 
     # Zero or negative makes no sense for shares or prices.
     if number <= 0:
@@ -221,6 +247,71 @@ def _past_date(value, label: str) -> date:
 
 
 # ===========================================================================
+# REPLAYING THE DIARY (used by every change below)
+# ===========================================================================
+
+def _replay(trades: list) -> tuple:
+    """Play the diary forward in date order: what you own, and each sale's gain.
+
+    Trades on the same day count in the order they were typed. Returns
+    (holdings, gains), where gains maps each sale's place in the diary to
+    its gain. It only reads the diary, so a problem changes nothing.
+    """
+    # The diary's places, sorted by date. sorted() keeps same-day trades in
+    # the order they were typed.
+    order = sorted(range(len(trades)), key=lambda i: trades[i]["date"])
+
+    receipts = []      # (place in the diary, receipt), so they can go back in typed order
+    gains = {}
+    for i in order:
+        t = trades[i]
+        if t["action"] == "buy":
+            receipts.append((i, {"ticker": t["ticker"], "shares": t["shares"], "buy_price": t["price"],
+                                 "buy_date": t["date"], "id": t["id"]}))
+            continue
+
+        # A sale, by the average cost method, using what you owned that day.
+        mine = [r for _, r in receipts if r["ticker"] == t["ticker"]]
+        owned = sum(r["shares"] for r in mine)
+        if t["shares"] > owned + TINY:
+            raise ValueError(f"You only owned {owned:g} shares of {t['ticker']} on {t['date']}, "
+                             f"so the sale of {t['shares']:g} that day doesn't fit.")
+        average_cost = sum(r["shares"] * r["buy_price"] for r in mine) / owned
+        gains[i] = round((t["price"] - average_cost) * t["shares"], 2)   # rounded to the cent
+
+        # Every receipt for this stock shrinks by the same fraction. Selling 25
+        # of 100 keeps 0.75 of each, so your average cost stays the same.
+        keep = (owned - t["shares"]) / owned
+        for r in mine:
+            r["shares"] *= keep
+        # Throw away receipts that are now (practically) zero shares.
+        receipts = [(j, r) for j, r in receipts if r["shares"] >= TINY]
+
+    # Show the receipts in the order they were typed, like before.
+    receipts.sort(key=lambda pair: pair[0])
+    return [r for _, r in receipts], gains
+
+
+def _rebuild(portfolio: dict, trades: list) -> dict:
+    """Make `trades` the portfolio's diary, and work everything out again from it.
+
+    If the replay finds a sale that doesn't fit, it raises a ValueError
+    before anything in the portfolio changes.
+    """
+    # Purchases saved before name tags existed get one now.
+    for t in trades:
+        if t["action"] == "buy" and "id" not in t:
+            t["id"] = uuid.uuid4().hex[:8]
+
+    holdings, gains = _replay(trades)          # stops here if something doesn't fit
+    for i, gain in gains.items():
+        trades[i]["realized_gain"] = gain
+    portfolio["trades"] = trades
+    portfolio["holdings"] = holdings
+    return portfolio
+
+
+# ===========================================================================
 # BUYING
 # ===========================================================================
 
@@ -245,17 +336,12 @@ def add_holding(portfolio: dict, ticker: str, shares, buy_price, buy_date=None) 
     # line both get it, so remove_holding() always deletes the right pair.
     tag = uuid.uuid4().hex[:8]
 
-    # Add a "receipt" to the holdings list.
+    # Add the purchase to the diary, then replay it. That makes the receipt,
+    # and re-works any later sale whose average cost this purchase changes.
     # .isoformat() turns the date into text like "2024-01-15" for the file.
-    portfolio["holdings"].append(
-        {"ticker": ticker, "shares": shares, "buy_price": buy_price, "buy_date": when.isoformat(), "id": tag}
-    )
-
-    # Add a matching line to the trade diary.
-    portfolio["trades"].append(
-        {"date": when.isoformat(), "action": "buy", "ticker": ticker, "shares": shares, "price": buy_price, "id": tag}
-    )
-    return portfolio
+    purchase = {"date": when.isoformat(), "action": "buy", "ticker": ticker,
+                "shares": shares, "price": buy_price, "id": tag}
+    return _rebuild(portfolio, portfolio["trades"] + [purchase])
 
 
 # ===========================================================================
@@ -283,9 +369,10 @@ def sell_holding(portfolio: dict, ticker: str, shares, sell_price, sell_date=Non
         disappear.
 
     A SALE DATED IN THE PAST
-        Only purchases made on or before the sell date count, both for how
-        many shares you can sell and for the average cost. Shares you bought
-        later aren't touched.
+        The diary is replayed in date order (see the top of this file), so
+        a sale only uses shares you owned on its date, and any later sale's
+        gain is worked out again. If this sale would leave a later sale
+        selling more than you owned, nothing changes and you get a message.
 
     Returns the same portfolio. The locked-in gain (or loss, if negative)
     is saved in the trade diary under "realized_gain".
@@ -296,54 +383,22 @@ def sell_holding(portfolio: dict, ticker: str, shares, sell_price, sell_date=Non
     sell_price = _positive_number(sell_price, "Sell price")
     when = _past_date(sell_date, "Sell date")
 
-    # Find every receipt for this stock.
-    receipts = [h for h in portfolio["holdings"] if h["ticker"] == ticker]
-    if not receipts:
+    # Find every purchase of this stock in the diary.
+    buys = [t for t in portfolio["trades"] if t["action"] == "buy" and t["ticker"] == ticker]
+    if not buys:
         raise ValueError(f"You don't own any {ticker}.")
 
     # You can't sell before you first bought.
-    first_buy = min(date.fromisoformat(h["buy_date"]) for h in receipts)
+    first_buy = min(date.fromisoformat(t["date"]) for t in buys)
     if when < first_buy:
         raise ValueError(f"Sell date can't be before your first {ticker} purchase on {first_buy}.")
 
-    # Only shares bought ON OR BEFORE the sell date can be sold. A sale
-    # dated in February can't use shares you bought in March.
-    receipts = [h for h in receipts if date.fromisoformat(h["buy_date"]) <= when]
-
-    # You can't sell more than you owned on that day.
-    owned = sum(h["shares"] for h in receipts)
-    if shares > owned + TINY:
-        raise ValueError(f"You only owned {owned:g} shares of {ticker} on {when}.")
-
-    # --- Work out the gain ---------------------------------------------------
-    total_paid = sum(h["shares"] * h["buy_price"] for h in receipts)
-    average_cost = total_paid / owned
-    realized_gain = (sell_price - average_cost) * shares
-
-    # --- Shrink the receipts -------------------------------------------------
-    # The fraction of shares you keep. Selling 25 of 100 keeps 0.75.
-    keep = (owned - shares) / owned
-    for h in receipts:
-        h["shares"] *= keep
-
-    # Throw away receipts that are now (practically) zero shares.
-    portfolio["holdings"] = [
-        h for h in portfolio["holdings"]
-        if not (h["ticker"] == ticker and h["shares"] < TINY)
-    ]
-
-    # --- Write it in the trade diary -----------------------------------------
-    portfolio["trades"].append(
-        {
-            "date": when.isoformat(),
-            "action": "sell",
-            "ticker": ticker,
-            "shares": shares,
-            "price": sell_price,
-            "realized_gain": round(realized_gain, 2),  # rounded to the cent
-        }
-    )
-    return portfolio
+    # --- Add the sale to the diary and replay it ------------------------------
+    # The replay works out the gain, shrinks the receipts, and checks you
+    # owned enough shares on that day (and on every later sale's day).
+    sale = {"date": when.isoformat(), "action": "sell", "ticker": ticker,
+            "shares": shares, "price": sell_price, "realized_gain": None}
+    return _rebuild(portfolio, portfolio["trades"] + [sale])
 
 
 # ===========================================================================
@@ -356,14 +411,15 @@ def remove_holding(portfolio: dict, row: int) -> dict:
     row  the purchase's row number in holdings_table(), starting at 0
 
     Its matching "buy" line in the trade diary is deleted too, because a
-    typo isn't a real trade. Use sell_holding() for real sales.
+    typo isn't a real trade. Use sell_holding() for real sales. If a later
+    sale needed this purchase's shares, nothing changes and you get a
+    message: remove that sale first with remove_trade().
     """
     # Make sure that row number exists.
     if not 0 <= row < len(portfolio["holdings"]):
         raise ValueError(f"There's no purchase in row {row}.")
 
-    # Take the receipt out of the holdings list.
-    receipt = portfolio["holdings"].pop(row)
+    receipt = portfolio["holdings"][row]
     trades = portfolio["trades"]
 
     # Find its matching diary line.
@@ -381,9 +437,38 @@ def remove_holding(portfolio: dict, row: int) -> dict:
         same_shares = [i for i in matches if abs(trades[i]["shares"] - receipt["shares"]) < TINY]
         matches = same_shares or matches
 
-    if matches:
-        del trades[matches[0]]  # only remove one line
-    return portfolio
+    # No diary line at all (a hand-edited file): just drop the receipt.
+    if not matches:
+        portfolio["holdings"].pop(row)
+        return portfolio
+
+    # Take the purchase out of the diary and replay what's left.
+    remaining = [t for i, t in enumerate(trades) if i != matches[0]]   # only remove one line
+    try:
+        return _rebuild(portfolio, remaining)
+    except ValueError as error:
+        raise ValueError(f"Removing that purchase would break a later sale. {error} "
+                         f"Remove that sale first with remove_trade().") from None
+
+
+def remove_trade(portfolio: dict, row: int) -> dict:
+    """Delete one line of the trade diary typed by mistake: a buy or a sale.
+
+    row  the line's row number in trades_table(), starting at 0
+
+    Everything is worked out again without it: removing a mistaken sale
+    puts its shares back. If removing a purchase would leave a later sale
+    selling more than you owned, nothing changes and you get a message.
+    """
+    trades = portfolio["trades"]
+    if not 0 <= row < len(trades):
+        raise ValueError(f"There's no trade in row {row}.")
+
+    remaining = trades[:row] + trades[row + 1:]
+    try:
+        return _rebuild(portfolio, remaining)
+    except ValueError as error:
+        raise ValueError(f"Removing that trade would break a later sale. {error}") from None
 
 
 # ===========================================================================

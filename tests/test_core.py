@@ -303,12 +303,8 @@ def test_dcf_reports_the_rate_it_really_used():
     assert auto["inputs"]["discount_rate_pct"] == max(auto["inputs"]["worked_out_rate_pct"], dcf.MIN_DISCOUNT_RATE_PCT)
 
 
-@pytest.mark.live
-def test_dcf_adds_back_interest_only_when_it_was_taken_off():
-    # Coca-Cola counts interest paid in operating cash: add it back.
-    assert dcf.dcf_valuation("KO")["inputs"]["interest_added"] > 0
-    # Loblaw reports interest paid under financing: nothing to add.
-    assert dcf.dcf_valuation("L.TO")["inputs"]["interest_added"] == 0
+# The live check of the interest adjustment on real companies lives in
+# test_review_fixes.py (test_dcf_interest_adjustment_on_real_companies).
 
 
 # ===========================================================================

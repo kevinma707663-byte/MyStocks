@@ -14,17 +14,24 @@ WHAT THIS FILE DOES
 HOW IT STAYS HONEST (the lesson from Air Canada's chatbot)
     In 2024 Air Canada had to pay a customer because its website chatbot
     made up a refund policy. A company is responsible for what its AI says,
-    so the coach is boxed in:
+    so the coach is boxed in. Its instructions tell it the rules, and then
+    our own code checks every note before anyone sees it:
       * Every fact comes from our own tested code. The AI only explains them.
-      * It never says buy, sell or hold, never predicts prices, and never
-        makes tax or legal claims of its own.
-      * Number check: if the note mentions a number that isn't in the app's
-        facts or the investor's own words, the note is thrown away.
+      * Advice check: it's told never to say buy, sell or hold or to predict
+        prices. A note that does anyway ("buy now", "it will rise") is
+        thrown away.
+      * Length check: it's asked for 80 words. Over 90, the note is thrown away.
+      * Number check: every number in the note must be in the app's facts
+        or the investor's own words, and a % must match a percentage there.
+        ("$200" can come from a $200 price; "200%" can't.)
       * Quote check: a bias only counts if its quote really is in the
         investor's own words.
+      * It's told not to make tax or legal claims. That rule lives only in
+        its instructions: no word check can catch every way to put it.
       * It's optional. With no API key, no internet, or any other problem,
         you get the normal rule warnings and nothing breaks.
-      * Every note comes with a disclaimer to show on screen.
+    The checks catch the common slips, not every possible one, which is why
+    every note comes with a disclaimer to show on screen.
 
 SETUP
     1. Get an API key from console.anthropic.com.
@@ -76,7 +83,8 @@ MODEL = "claude-opus-5-5"   # which Claude writes the note
 EFFORT = "low"              # how hard it thinks: a short note doesn't need deep thought
 MAX_TOKENS = 16000          # a safety ceiling, not a target: you only pay for what's used
 TIMEOUT_SECONDS = 60        # give up after this long, so the app never hangs
-MAX_NOTE_WORDS = 90         # keep the note short enough to read in a few seconds
+PROMPT_WORDS = 80           # the length the coach is asked for
+MAX_NOTE_WORDS = 90         # longer than this and the note is thrown away (a little room to spare)
 
 # Shown on screen next to every note.
 DISCLAIMER = "Written by AI from the app's own numbers. It can be wrong, and it isn't financial advice."
@@ -103,7 +111,7 @@ Rules:
 - Only use numbers that appear in the facts, or in the investor's reason when you are repeating what they said. Write small counts as words.
 - Never tell the investor to buy, sell or hold, and never predict where a price is going. Ask questions that help them decide for themselves.
 - Don't make tax or legal claims. If a rule warning mentions tax, you may point to that warning, and nothing more.
-- Write at most {MAX_NOTE_WORDS} words, in plain English, speaking to the investor as "you". End with one or two questions.
+- Write at most {PROMPT_WORDS} words, in plain English, speaking to the investor as "you". End with one or two questions.
 - If the rules found nothing and the reason sounds considered, keep it short and say the trade looks calm.
 
 Biases: if the reason shows any of the biases below, list each one with the exact words from the reason that show it. If there is no reason, or none fit, list none.
@@ -132,8 +140,22 @@ OUTPUT_SCHEMA = {
     "additionalProperties": False,
 }
 
-# Finds numbers like 42, 3.5 or 1,234.56 inside a sentence.
-NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+# Finds numbers like 42, 3.5 or 1,234.56 inside a sentence, and whether a
+# % sign (or the word "percent") comes right after.
+NUMBER = re.compile(r"(\d[\d,]*(?:\.\d+)?)(\s*%|\s*percent)?", re.IGNORECASE)
+
+# Words that mean a note gave an order or predicted a price. A note with any
+# of them is thrown away, whatever the instructions said. (Questions like
+# "Would you still buy it?" are fine: an order has to start a sentence.)
+ADVICE = re.compile(
+    r"\b(you should|you must|i suggest you|i'd|i would)\s+(buy|sell|hold)\b"           # "you should sell"
+    r"|\bi (strongly )?recommend\b"                                                    # "I recommend ..."
+    r"|(^|[.!?]\s+)(buy|sell|hold)\s+(now|it|this|more|today|some)\b"                  # "Buy now."
+    r"|\b(will|is going to|going to|is bound to|is set to)\s+(rise|fall|drop|climb|soar|jump|crash|"
+    r"double|triple|go up|go down|recover|rebound|bounce back|keep rising|keep falling)\b"   # "it will rise"
+    r"|\b(guaranteed|can't lose|cannot lose|sure thing|price target)\b",
+    re.IGNORECASE,
+)
 
 
 # ===========================================================================
@@ -148,8 +170,9 @@ def _no_note(status: str, why: str) -> dict:
 def _facts(portfolio: dict, action: str, ticker: str, shares: float, price: float, found: list) -> dict:
     """Everything the coach is allowed to talk about, all worked out by our own code.
 
-    It only reads the portfolio dictionary, so it needs no internet. The
-    rule warnings already hold the market facts, like a big run-up.
+    Apart from the stock's currency (asked from Yahoo, then remembered for
+    an hour), it only reads the portfolio dictionary. The rule warnings
+    already hold the market facts, like a big run-up.
     """
     # This stock, if you already own some.
     receipts = [h for h in portfolio["holdings"] if h["ticker"] == ticker]
@@ -200,18 +223,43 @@ def _plain(text: str) -> str:
                     .replace("“", '"').replace("”", '"').split())
 
 
+def _numbers_in(text: str) -> list:
+    """Every number in some text, as (number, is it a percent?, how it was written)."""
+    return [(float(m.group(1).replace(",", "")), bool(m.group(2)), m.group(1)) for m in NUMBER.finditer(text)]
+
+
+def _fact_numbers(value, key: str = "") -> list:
+    """Every number in the facts, as (number, is it a percent?).
+
+    A number counts as a percent if it's written with a % in a message,
+    or if its name ends in _pct, like "this_price_vs_average_cost_pct".
+    Signs are dropped: -8.3 may be written as "down 8%".
+    """
+    if isinstance(value, dict):
+        return [n for k, v in value.items() for n in _fact_numbers(v, k)]
+    if isinstance(value, list):
+        return [n for v in value for n in _fact_numbers(v, key)]
+    if isinstance(value, bool) or value is None:
+        return []
+    if isinstance(value, (int, float)):
+        return [(abs(float(value)), key.endswith("_pct"))]
+    return [(number, is_pct) for number, is_pct, _ in _numbers_in(str(value))]
+
+
 def _unknown_numbers(note: str, facts: dict, reason: str = "") -> list:
     """Numbers in the note that aren't in the facts or the investor's own words.
 
     Rounding is fine: 41.7% may be written as 42%. Repeating the investor's
-    own number back ("you said you lost $2,000") is fine too. Anything else
+    own number back ("you said you lost $2,000") is fine too. A percent must
+    match a percent: "200%" isn't backed up by a $200 price. Anything else
     means the AI made a number up, and the note is thrown away.
     """
-    known = [float(n.replace(",", "")) for n in NUMBER.findall(json.dumps(facts) + " " + reason)]
+    known = _fact_numbers(facts) + [(n, is_pct) for n, is_pct, _ in _numbers_in(reason)]
     unknown = []
-    for text in NUMBER.findall(note):
-        n = float(text.replace(",", ""))
-        if not any(abs(n - k) <= max(0.5, abs(k) * 0.01) for k in known):
+    for n, is_pct, text in _numbers_in(note):
+        # A percent can only match a known percent; a plain number can match any.
+        pool = [k for k, k_is_pct in known if k_is_pct or not is_pct]
+        if not any(abs(n - k) <= max(0.5, k * 0.01) for k in pool):
             unknown.append(text)
     return unknown
 
@@ -302,7 +350,16 @@ def coach_note(portfolio: dict, action: str, ticker: str, shares, price, reason:
     if not note:
         return _no_note("unavailable", "The AI coach couldn't write a note this time.")
 
-    # --- 6. The two honesty checks ---------------------------------------------
+    # --- 6. The honesty checks ---------------------------------------------------
+    # The instructions ask for all of this. These checks make sure of it.
+    # Length check: a short note, as asked, with a little room to spare.
+    if len(note.split()) > MAX_NOTE_WORDS:
+        return _no_note("unavailable", "The AI coach's note was left out because it was too long.")
+
+    # Advice check: no orders and no price predictions.
+    if ADVICE.search(_plain(note)):
+        return _no_note("unavailable", "The AI coach's note was left out because it sounded like advice or a prediction.")
+
     # Number check: a number that isn't in the facts or their words means it made one up.
     if _unknown_numbers(note, facts, reason):
         return _no_note("unavailable", "The AI coach's note was left out because it used a number the app didn't give it.")
