@@ -10,6 +10,7 @@ numpy>=2.5,<3           # fast math
 scipy>=1.18,<2          # the optimizer engine (chunk 4)
 plotly>=7.1,<8          # charts
 streamlit>=1.66,<2      # the app screens your partner builds
+anthropic>=2.3,<3       # talks to Claude for the AI trading coach (chunk 7)
 
 # For the Jupyter notebook
 notebook>=7.6,<8

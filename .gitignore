@@ -9,3 +9,7 @@ __pycache__/
 # Your real holdings are personal, so they stay off git
 data/*.json
 data/*.tmp
+
+# API keys are like a credit card number: never on GitHub
+.streamlit/secrets.toml
+.env

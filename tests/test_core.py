@@ -320,8 +320,6 @@ import streamlit as st
 from core import portfolio as pf
 from core import warnings_sidebar as ws
 
-ws.check_trade = lambda *args, **kwargs: []        # no market data needed for this test
-
 if "portfolio" not in st.session_state:
     st.session_state.portfolio = pf.empty_portfolio()
 portfolio = st.session_state.portfolio
@@ -354,8 +352,11 @@ if pending:
 '''
 
 
-def test_streamlit_check_then_record_really_records():
+def test_streamlit_check_then_record_really_records(monkeypatch):
     from streamlit.testing.v1 import AppTest
+    # No market data needed for this test. monkeypatch puts the real
+    # check_trade back afterwards, so later tests aren't affected.
+    monkeypatch.setattr(ws, "check_trade", lambda *args, **kwargs: [])
     app = AppTest.from_string(TRADE_FORM_APP).run()
     app.text_input[0].input("KO")
     app.number_input[0].set_value(5)
