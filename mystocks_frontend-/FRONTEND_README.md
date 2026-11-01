@@ -20,12 +20,3 @@ Light theme (`.streamlit/config.toml` + CSS in `app/theme.py`). Each tab opens w
 ## Never touched
 core/** (not in the zip at all).
 
-## Safe merge into the shared repo (do NOT copy this whole folder over it)
-git pull                                  # get his latest first
-git checkout -b frontend
-# copy ONLY these into your clone: streamlit_app.py, app/, .streamlit/, sample/, FRONTEND_README.md
-git status                                # confirm nothing under core/ shows as modified
-git add streamlit_app.py app .streamlit/config.toml .streamlit/secrets.toml.example sample FRONTEND_README.md
-git commit -m "Add mobile-first Streamlit frontend"
-git push -u origin frontend               # then open a pull request for him to review
-Keep `core/` at the repo root next to streamlit_app.py (the app does `from core import ...`).
