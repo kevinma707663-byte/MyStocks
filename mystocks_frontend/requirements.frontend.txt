@@ -1,6 +1,0 @@
-yfinance
-pandas
-numpy
-scipy
-plotly
-streamlit>=1.50
