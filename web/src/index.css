@@ -432,3 +432,6 @@ button.risk-item { width: 100%; border: 0; border-top: 1px solid #edf0f4; backgr
 .dcf-card strong { font: 700 26px 'Manrope', sans-serif; color: #1b2639; }
 .stock-tabs .chart-group { margin-top: 12px; }
 @media (max-width: 900px) { .stock-tabs { padding: 14px; } }
+
+/* The set-up page's logo text: .brand (white, for the dark sidebar) comes later in this file and won. */
+.brand.setup-brand { color: #17233c; }
