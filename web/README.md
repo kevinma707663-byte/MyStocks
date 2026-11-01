@@ -12,15 +12,26 @@ browser (web/, React)  --/api/...-->  api/main.py (FastAPI)  -->  core/ (the bra
 
 You need two terminals, both started from the project folder.
 
-**1. The Python server** (needs Python 3.12+):
+**1. The Python server** (needs Python 3.12+). The first two lines are only
+needed the first time.
+
+Mac:
 
 ```bash
-python -m venv .venv                       # once
-.venv/bin/python -m pip install -r requirements.txt   # once
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 .venv/bin/uvicorn api.main:app --reload --port 8000
 ```
 
-**2. The screens** (needs Node.js 20+):
+Windows:
+
+```bat
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\uvicorn api.main:app --reload --port 8000
+```
+
+**2. The screens** (needs Node.js 20+). The same on Mac and Windows:
 
 ```bash
 cd web
@@ -29,7 +40,7 @@ npm run dev
 ```
 
 Open http://localhost:5173. While developing, Vite passes every `/api`
-request on to the Python server on port 8000.
+request on to the Python server on port 8000. Keep both terminals open.
 
 ## Where things live
 
@@ -51,8 +62,13 @@ request on to the Python server on port 8000.
   S&P 500 twin and the date-based warnings are switched off, the same as in
   the Streamlit app.
 - **The AI coach** needs `ANTHROPIC_API_KEY` set in the terminal that runs the
-  Python server. Without it, the coach says it's off and everything else works.
-  Each visitor gets 10 coach notes a day (`COACH_NOTES_PER_DAY` in `api/main.py`).
+  Python server, before starting it. Without it, the coach says it's off and
+  everything else works. Each visitor gets 10 coach notes a day
+  (`COACH_NOTES_PER_DAY` in `api/main.py`). Never put the key in the code or on GitHub.
+  - Mac: `export ANTHROPIC_API_KEY="sk-ant-..."`
+  - Windows (PowerShell): `$env:ANTHROPIC_API_KEY="sk-ant-..."`
+  - Windows, for every new terminal: `setx ANTHROPIC_API_KEY "sk-ant-..."`, then
+    open a new terminal (the notebook's Step 7.1 does this)
 - **The server handles one request at a time**, because `core/`'s data memory
   isn't built for two at once. The first look at a stock takes 15 to 30 seconds;
   repeats within the hour are fast.
