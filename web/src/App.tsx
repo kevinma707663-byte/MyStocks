@@ -7,6 +7,7 @@ import {
 } from './api'
 import { AREA_HELP, DISCLAIMER, GLOSSARY, PAGES, RULE_HELP, STOCK_TABS, TRADE_HELP } from './content'
 import { ChartGroup } from './Chart'
+import { FinChat, loadProfile, storeProfile, type Profile } from './Fin'
 
 type IconName =
   | 'grid'
@@ -196,12 +197,17 @@ function Notes({ notes }: { notes?: string[] }) {
 function App() {
   const [saved, setSaved] = useState<Saved | null>(loadSaved)
   const [settingUp, setSettingUp] = useState(false)
+  const [profile, setProfile] = useState<Profile | null>(loadProfile)
 
   function update(next: Saved | null) {
     storeSaved(next)
     setSaved(next)
   }
 
+  // First screen: Fin asks four questions (once per browser), before anything else.
+  if (!profile) {
+    return <FinChat onDone={(answers) => { storeProfile(answers); setProfile(answers) }} />
+  }
   if (!saved || settingUp) {
     return <PortfolioSetup
       onCancel={saved ? () => setSettingUp(false) : undefined}

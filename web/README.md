@@ -49,6 +49,7 @@ request on to the Python server on port 8000. Keep both terminals open.
 | `src/App.tsx` | Every screen: set-up, dashboard, and the 8 guided steps |
 | `src/api.ts` | The only file that talks to the server, with a type for each answer |
 | `src/content.ts` | The plain-English words: each page's tip, "Words explained", what each risk area asks, the optimizer rule help. Emma's text from the Streamlit app, word for word. To add or edit a definition, change this file only |
+| `src/Fin.tsx` | The first screen: Fin the fish asks 4 quick questions (scripted, not AI, no cost), the same words as the Streamlit app's `app/chat.py` and `app/mascot.py`. The answers stay in the visitor's browser. To change a question or reply, change this file only |
 | `src/Chart.tsx` | Draws `core/`'s own Plotly charts (the ones the Streamlit app showed), sent by the server as JSON. plotly.js (about 1.4 MB zipped) only downloads the first time a chart is opened. Keep `plotly.js-dist-min` on the version the Python `plotly` package uses (`plotly.offline.get_plotlyjs_version()`) |
 | `src/index.css` | The look (the Figma design, plus the styles added for real data and phones) |
 | `../api/main.py` | The server: one address per `core/` function the screens use |
