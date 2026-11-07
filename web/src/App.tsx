@@ -624,7 +624,17 @@ function Dashboard({ portfolio, datesKnown, portfolioKey, overview, risks, onNav
 /** Fin's "Start here" card: what to look at first, from the four answers. Hidden if they were skipped. */
 function StartHere({ risks, onNavigate, onAskAgain }: { risks?: Risks; onNavigate: (m: string) => void; onAskAgain: () => void }) {
   const lines = startingPoint(useContext(ProfileContext), risks)
-  if (!lines.length) return null
+  // Skipped (or nothing to say yet): still offer the questions, or there'd be no way back to them.
+  if (!lines.length) return (
+    <section className="start-here">
+      <FinFace size={58} />
+      <div>
+        <strong>Want the app to fit you?</strong>
+        <p className="start-here-text">Fin can ask 4 quick questions and point you to where to start.</p>
+        <button className="start-here-again" onClick={onAskAgain}>Answer Fin's questions</button>
+      </div>
+    </section>
+  )
   return (
     <section className="start-here">
       <FinFace size={58} />
