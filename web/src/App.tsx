@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   api, ApiError,
   type Chart, type CoachTip, type Group, type Level, type Optimized, type Overview, type Portfolio,
@@ -7,7 +7,10 @@ import {
 } from './api'
 import { AREA_HELP, DISCLAIMER, GLOSSARY, PAGES, RULE_HELP, STOCK_TABS, TRADE_HELP } from './content'
 import { ChartGroup } from './Chart'
-import { FinChat, loadProfile, storeProfile, type Profile } from './Fin'
+import { beginner, dropDefault, FinChat, FinFace, goalDefault, loadProfile, startingPoint, storeProfile, type Profile } from './Fin'
+
+// Fin's answers, for any page that fits itself to them. {} means the visitor skipped the questions.
+const ProfileContext = createContext<Profile>({})
 
 type IconName =
   | 'grid'
@@ -174,9 +177,10 @@ function Tip({ page }: { page: string }) {
 /** The bottom of every page: the words it uses, explained, and the disclaimer. */
 function PageEnd({ page }: { page: string }) {
   const terms = PAGES[page]?.terms ?? []
+  const openAtStart = beginner(useContext(ProfileContext)) // beginners see the words opened
   return <>
     {terms.length > 0 && (
-      <details className="glossary">
+      <details className="glossary" open={openAtStart}>
         <summary>📖 Words explained</summary>
         <dl>{terms.map((term) => <div key={term}><dt>{term}</dt><dd>{GLOSSARY[term]}</dd></div>)}</dl>
       </details>
@@ -214,10 +218,12 @@ function App() {
       onComplete={(portfolio, datesKnown) => { update({ portfolio, datesKnown }); setSettingUp(false) }}
     />
   }
-  return <Workspace saved={saved} onChange={update} onSetUp={() => setSettingUp(true)} />
+  return <ProfileContext.Provider value={profile}>
+    <Workspace saved={saved} onChange={update} onSetUp={() => setSettingUp(true)} onAskAgain={() => { storeProfile(null); setProfile(null) }} />
+  </ProfileContext.Provider>
 }
 
-function Workspace({ saved, onChange, onSetUp }: { saved: Saved; onChange: (next: Saved | null) => void; onSetUp: () => void }) {
+function Workspace({ saved, onChange, onSetUp, onAskAgain }: { saved: Saved; onChange: (next: Saved | null) => void; onSetUp: () => void; onAskAgain: () => void }) {
   const { portfolio, datesKnown } = saved
   const key = useMemo(() => JSON.stringify(portfolio), [portfolio])
 
@@ -295,7 +301,7 @@ function Workspace({ saved, onChange, onSetUp }: { saved: Saved; onChange: (next
         {activeNav === 'Dashboard' ? (
           <Dashboard
             portfolio={portfolio} datesKnown={datesKnown} portfolioKey={key}
-            overview={overview} risks={risks} onNavigate={setActiveNav} onSetUp={onSetUp}
+            overview={overview} risks={risks} onNavigate={setActiveNav} onSetUp={onSetUp} onAskAgain={onAskAgain}
           />
         ) : (
           <ModulePage module={activeNav} onBack={() => setActiveNav('Dashboard')} onNext={setActiveNav}>
@@ -333,6 +339,14 @@ function Workspace({ saved, onChange, onSetUp }: { saved: Saved; onChange: (next
 // ===========================================================================
 // SETTING UP AND ADDING HOLDINGS
 // ===========================================================================
+
+/** The empty CSV the Streamlit app offered: fill it in (one stock per row) and import it. Made in the browser. */
+function downloadTemplate() {
+  const url = URL.createObjectURL(new Blob(['Ticker,Quantity,Currency,PricePaid\n'], { type: 'text/csv' }))
+  const link = Object.assign(document.createElement('a'), { href: url, download: 'MyStocks_Portfolio_Template.csv' })
+  link.click()
+  URL.revokeObjectURL(url)
+}
 
 type Row = { ticker: string; shares: string; price: string; market: string; date: string }
 const emptyRow = (): Row => ({ ticker: '', shares: '', price: '', market: 'US', date: '' })
@@ -408,7 +422,9 @@ function PortfolioSetup({ onComplete, onCancel }: { onComplete: (p: Portfolio, d
             <input ref={fileInput} type="file" accept=".csv" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) bring(() => api.importFile(f)); e.target.value = '' }} />
             <button type="button" onClick={() => fileInput.current?.click()}><Icon name="plus" size={14} /> Import broker file (.csv)</button>
             <button type="button" onClick={() => bring(api.sample)}>Try a sample portfolio</button>
+            <button type="button" onClick={downloadTemplate}>📥 Download CSV template</button>
           </div>
+          <small className="import-help">Upload a CSV with Ticker, Quantity, Currency and PricePaid. Older broker files using Symbol are also supported.</small>
           {imported ? (
             <div className="imported">
               <strong>Read {imported.portfolio.holdings.length} holdings.</strong>
@@ -511,9 +527,9 @@ function totals(summary: Overview['summary']) {
   }
 }
 
-function Dashboard({ portfolio, datesKnown, portfolioKey, overview, risks, onNavigate, onSetUp }: {
+function Dashboard({ portfolio, datesKnown, portfolioKey, overview, risks, onNavigate, onSetUp, onAskAgain }: {
   portfolio: Portfolio; datesKnown: boolean; portfolioKey: string
-  overview: Loaded<Overview>; risks: Loaded<Risks>; onNavigate: (m: string) => void; onSetUp: () => void
+  overview: Loaded<Overview>; risks: Loaded<Risks>; onNavigate: (m: string) => void; onSetUp: () => void; onAskAgain: () => void
 }) {
   if (overview.loading) return <div className="content"><Loading text="Getting the latest prices…" /></div>
   if (overview.error || !overview.data) return <div className="content"><Problem error={overview.error ?? new ApiError('No data.')} onRetry={overview.retry} /></div>
@@ -545,6 +561,7 @@ function Dashboard({ portfolio, datesKnown, portfolioKey, overview, risks, onNav
         </div>
       </section>
       <Tip page="Dashboard" />
+      <StartHere risks={risks.data} onNavigate={onNavigate} onAskAgain={onAskAgain} />
       <Notes notes={notes} />
       <section className="hero-summary">
         <div>
@@ -601,6 +618,22 @@ function Dashboard({ portfolio, datesKnown, portfolioKey, overview, risks, onNav
       )}
       <PageEnd page="Dashboard" />
     </div>
+  )
+}
+
+/** Fin's "Start here" card: what to look at first, from the four answers. Hidden if they were skipped. */
+function StartHere({ risks, onNavigate, onAskAgain }: { risks?: Risks; onNavigate: (m: string) => void; onAskAgain: () => void }) {
+  const lines = startingPoint(useContext(ProfileContext), risks)
+  if (!lines.length) return null
+  return (
+    <section className="start-here">
+      <FinFace size={58} />
+      <div>
+        <strong>Start here</strong>
+        <ul>{lines.map((l) => <li key={l.text}><Rich text={l.text} />{l.page && <button onClick={() => onNavigate(l.page!)}>{l.button} <Icon name="chevron" size={13} /></button>}</li>)}</ul>
+        <button className="start-here-again" onClick={onAskAgain}>Answer Fin's questions again</button>
+      </div>
+    </section>
   )
 }
 
@@ -1055,8 +1088,9 @@ function RiskPage({ risks }: { risks: Loaded<Risks> }) {
 // --- Step 5: MyOptimizer ------------------------------------------------------------
 
 function OptimizerPage({ portfolio, result, onResult, onEdit }: { portfolio: Portfolio; result: Optimized | null; onResult: (r: Optimized) => void; onEdit: () => void }) {
-  const [goal, setGoal] = useState('sharpe')
-  const [rules, setRules] = useState({ max_drawdown_pct: 25, min_return_pct: 8, max_weight_pct: 30, min_weight_pct: 0 })
+  const profile = useContext(ProfileContext)
+  const [goal, setGoal] = useState(() => goalDefault(profile))
+  const [rules, setRules] = useState({ max_drawdown_pct: dropDefault(profile, 25), min_return_pct: 8, max_weight_pct: 30, min_weight_pct: 0 })
   const [extra, setExtra] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)

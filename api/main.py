@@ -62,7 +62,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_FILE = PROJECT_ROOT / "practice" / "OpenPosition_10_24_2026.csv"
 
 # The columns a broker positions file must have.
-BROKER_COLUMNS = ["Symbol", "Quantity", "Currency", "PricePaid"]
+# The Streamlit template's columns. Older broker files say "Symbol" instead of "Ticker"; both work.
+BROKER_COLUMNS = ["Ticker", "Quantity", "Currency", "PricePaid"]
 
 # These warnings need real buy dates. After a broker import every date is
 # "today", so they would be false alarms, and they're left out.
@@ -188,20 +189,27 @@ def to_yahoo(symbol: str, currency: str) -> str:
 def read_broker_file(source) -> dict:
     """A broker positions file -> {"portfolio", "problems"}. Rows that can't be read are listed, not hidden."""
     try:
-        broker = pd.read_csv(source, thousands=",")
+        # utf-8-sig: Excel's "CSV UTF-8" files start with an invisible mark that would spoil the first column name.
+        broker = pd.read_csv(source, thousands=",", encoding="utf-8-sig")
     except Exception:
         raise ValueError("That file couldn't be read. Upload the positions file as a .csv.") from None
     broker.columns = [str(c).strip() for c in broker.columns]
+    if "Ticker" not in broker.columns and "Symbol" in broker.columns:
+        broker = broker.rename(columns={"Symbol": "Ticker"})
     missing = [c for c in BROKER_COLUMNS if c not in broker.columns]
     if missing:
-        raise ValueError("This doesn't look like a supported broker file. Missing columns: " + ", ".join(missing))
+        raise ValueError("This doesn't look like a supported file. Missing columns: " + ", ".join(missing)
+                         + ". Use the template: Ticker, Quantity, Currency, PricePaid.")
 
     portfolio, problems = pf.empty_portfolio(), []
     for i, row in broker.iterrows():
+        ticker = "" if pd.isna(row["Ticker"]) else str(row["Ticker"]).strip()
         try:
-            pf.add_holding(portfolio, to_yahoo(row["Symbol"], row["Currency"]), row["Quantity"], row["PricePaid"])
-        except ValueError as error:
-            problems.append(f"Row {i + 2} ({row['Symbol']}): {error}")
+            if not ticker:
+                raise ValueError("Ticker is empty")
+            pf.add_holding(portfolio, to_yahoo(ticker, row["Currency"]), float(row["Quantity"]), float(row["PricePaid"]))
+        except (ValueError, TypeError) as error:
+            problems.append(f"Row {i + 2} ({ticker or '?'}): {error}")
     if not portfolio["holdings"]:
         raise ValueError("No holdings could be read from that file.")
     return {"portfolio": portfolio, "problems": problems}
@@ -332,6 +340,8 @@ def risks(ask: WithPortfolio):
         "risk_shares": table(report["risk_shares"], "ticker"),
         "correlation": {"tickers": list(correlation.columns), "values": plain(correlation.values.tolist())},
         "underwater": series_chart(report["underwater"].to_frame("below_high_pct")),
+        # The worst fall, from every day (the chart above is thinned, so it can miss the bottom).
+        "worst_fall_pct": abs(float(report["underwater"].min())) if len(report["underwater"]) else None,
         "charts": charts(report, {"sectors": mr.sector_chart, "correlation": mr.correlation_chart,
                                   "risk_share": mr.risk_share_chart, "drawdown": mr.drawdown_chart}),
         "notes": notes,

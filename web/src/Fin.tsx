@@ -65,6 +65,42 @@ export const QUESTIONS: Question[] = [
 // The visitor's answers, e.g. { experience: 'new', goal: 'grow', ... }. {} means they skipped.
 export type Profile = Record<string, string>
 
+// What each answer means for the app (design choices of this frontend, not backend rules), as in
+// chat.py. Starting values that the person can still change on the MyOptimizer page.
+const DROP_STARTING_POINT: Record<string, number> = { sell: 15, hold: 25, buy: 35 } // "biggest fall you'd accept (%)"
+
+export const goalDefault = (p: Profile) => (p.goal === 'protect' ? 'low_risk' : 'sharpe')
+export const dropDefault = (p: Profile, fallback: number) => DROP_STARTING_POINT[p.drop] ?? fallback
+export const beginner = (p: Profile) => p.experience === 'new' || p.goal === 'learn'
+
+// One line of the "Start here" card: plain text, **bold**, and an optional page to jump to.
+export type StartLine = { text: string; page?: string; button?: string }
+
+/** A short, personal "Start here" card for the Dashboard. Facts come from the real risk report.
+ *  Same words as chat.py's starting_point, with the Streamlit tab names changed to this app's pages. */
+export function startingPoint(p: Profile, risk?: { worst_fall_pct: number | null; period: { years: number } }): StartLine[] {
+  const lines: StartLine[] = []
+  const goal: Record<string, StartLine> = {
+    grow: { text: "You're playing the long game: **MyRisks** shows what could slow it down.", page: 'MyRisks', button: 'View risks' },
+    trade: { text: "You like acting on stock moves: use **Warning Check** to check a trade (and write down why) before you place it.", page: 'Warning Check', button: 'Check a trade' },
+    protect: { text: 'You want to protect what you have: start with **MyRisks**, then **MyOptimizer** with the lowest-risk goal.', page: 'MyRisks', button: 'View risks' },
+    learn: { text: "You're here to learn: every page has a tip at the top and a **Words explained** section at the bottom." },
+  }
+  if (goal[p.goal]) lines.push(goal[p.goal])
+  if (p.drop && risk?.worst_fall_pct != null) {
+    const worst = risk.worst_fall_pct
+    const said = { sell: "you'd likely sell after a 20% fall", hold: "you'd worry but hold after a 20% fall", buy: "you'd buy more after a 20% fall" }[p.drop]
+    const past = worst >= 20
+      ? "That's more than 20%, so a drop like your scenario has already happened to this mix."
+      : "That's less than 20%, so your scenario hasn't happened to this mix in that time (it still could)."
+    if (said) lines.push({ text: `You said ${said}. Over the past ${risk.period.years} years this mix's worst fall was **${worst.toFixed(0)}%**. ${past}` })
+  }
+  if (p.decide === 'tips') {
+    lines.push({ text: "You often buy on tips. In **Warning Check**, type why you're buying: the AI coach looks for tip-driven and crowd-driven reasoning.", page: 'Warning Check', button: 'Check a trade' })
+  }
+  return lines
+}
+
 const PROFILE_KEY = 'mystocks.profile.v1'
 const VOICE_KEY = 'mystocks.finVoice.v1'
 

@@ -52,6 +52,7 @@ export type Risks = {
   bad_day: { loss_pct: number; loss: number; average_bad_day_pct: number; average_bad_day_loss: number }
   risk_shares: { ticker: string; 'money %': number; 'risk %': number }[]
   underwater: Chart
+  worst_fall_pct: number | null
   correlation: { tickers: string[]; values: (number | null)[][] }
   charts: { sectors?: Figure; correlation?: Figure; risk_share?: Figure; drawdown?: Figure }
   notes: string[]
